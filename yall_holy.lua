@@ -84,6 +84,13 @@ local function icon(v)
 	if v:find("rbx") or v:find("http") then return v end
 	return ""
 end
+local IS_PHONE
+do
+	local UIS = UserInputService
+	local cam = workspace.CurrentCamera
+	local vp = cam and cam.ViewportSize
+	IS_PHONE = UIS.TouchEnabled and (vp == nil or vp.X <= 1100)
+end
 local lib = {
 	ver = "1",
 	alive = true,
@@ -130,7 +137,7 @@ local lib = {
 	tone = "Click",
 	tonelist = { "Click", "Bubble", "Soft" },
 	notices = true,
-	noticecap = (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled) and 3 or 6,
+	noticecap = IS_PHONE and 3 or 6,
 	hotkeys = true,
 	functions = false,
 	watermark = true,
@@ -138,7 +145,7 @@ local lib = {
 	title = "menu",
 	logo = "",
 	scale = 1,
-	mobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled,
+	mobile = IS_PHONE,
 	opener = false,
 }
 _gameNameSetters[#_gameNameSetters + 1] = function(nm)
@@ -3955,8 +3962,8 @@ function lib:window(cfg)
 	local vs = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or gui.AbsoluteSize
 	local phone = self.mobile and true or false
 	size = size or (phone and UDim2.fromOffset(
-		math.clamp(math.floor(vs.X * 0.54), 480, 680),
-		math.clamp(math.floor(vs.Y * 0.88), 380, 560)
+		math.clamp(math.floor(vs.X * 0.94), 320, math.max(320, math.floor(vs.X - 16))),
+		math.clamp(math.floor(vs.Y * 0.8), 300, 560)
 	) or UDim2.fromOffset(
 		math.min(680, math.max(528, vs.X - 48)),
 		math.min(560, math.max(420, vs.Y - 48))
