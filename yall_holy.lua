@@ -141,7 +141,6 @@ local lib = {
 	mobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled,
 	opener = false,
 }
--- game.Name can be a stub ("Ugc"); the real place name arrives async and the folder is only fixed until it is first used
 _gameNameSetters[#_gameNameSetters + 1] = function(nm)
 	if lib._gamedir == nil then lib.game = saname(nm) or lib.game end
 end
@@ -160,7 +159,6 @@ local bound, reapply = {}, {}
 local function themed(inst, prop, key)
 	bound[#bound + 1] = { inst, prop, key }
 	inst[prop] = THEME[key]
-	-- UIGradient tints images/text too (and the whole canvas on a CanvasGroup), so only plain frames get the theme gradient
 	if prop == "BackgroundColor3" and (key == "accent" or key == "bg" or key == "side") and (inst:IsA("Frame") or inst:IsA("ScrollingFrame")) then
 		local g = Instance.new("UIGradient")
 		g.Name = "ThemeGradient"
@@ -438,8 +436,6 @@ do
 	if not ok or not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
 end
 lib.scr = gui
--- never hide on GuiService.MenuOpened: instead of disappearing, our low DisplayOrder
--- keeps the library below Roblox's own menu overlay on both PC and phones
 local sounds = {}
 for _, n in ipairs({ "open", "click", "tick", "soft" }) do
 	sounds[n] = mk("Sound", { SoundId = "rbxasset://sounds/electronicpingshort.wav", Volume = 0.34, Name = randname() }, gui)
@@ -919,7 +915,6 @@ local function container_new(parent, ctx)
 			setlistener(function(k, cancel)
 				listener = nil
 				if cancel then
-					-- clicked away: keep whatever bind was there
 					keybox.Text = el.bind.key and el.bind.key.Name or "None"
 				elseif not k or k == Enum.KeyCode.Escape or k == Enum.KeyCode.Backspace then
 					el.bind.key = nil
@@ -1714,7 +1709,6 @@ local function hkchip(el, inner, order)
 	}, inner)
 	return b
 end
--- the whole pill is one click target: press it to rebind, Escape drops the bind
 local function hklisten(el, chip)
 	if hkListening then return end
 	hkListening = el
@@ -1855,7 +1849,6 @@ do
 	function lib:setfunctions(b) self.functions = b and true or false; self._fnrefresh() end
 end
 local MASKPAD = 4
--- roblox has no per-label blur, so privacy is a plain dash line sized to the nick
 local MASK_CH = "—"
 local function masktext(parent, cfg)
 	local text = tostring(cfg.Text or "")
@@ -2925,7 +2918,6 @@ local function buildpage(tab, win)
 		end)
 		showtitle()
 	end
-	-- clicking the X drops the textbox focus first, and the click event right after would reopen it
 	sb.MouseButton1Click:Connect(function()
 		if sopen then closesearch()
 		elseif os.clock() - sclosedat > 0.35 then opensearch() end
@@ -4003,8 +3995,6 @@ function lib:window(cfg)
 	local frame = mk("Frame", { BackgroundTransparency = 1, ZIndex = 20, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1) }, root)
 	corner(frame, radius); stroke(frame, "line", 0.6)
 	local base = mk("Frame", { ZIndex = 0, BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1) }, root)
-	-- window drag from non-interactive areas is handled by the global catch-all below
-	-- (it suppresses page/tab scrolling while dragging); drag from sections is rejected via yhSection
 	local body = mk("Frame", { Position = UDim2.fromOffset(side, 0), ClipsDescendants = true, ZIndex = 1, BorderSizePixel = 0, Size = UDim2.new(1, -side, 1, 0), bind = { BackgroundColor3 = "bg" } }, root)
 	corner(body, radius)
 	mk("Frame", { ZIndex = 1, BorderSizePixel = 0, Size = UDim2.new(0, radius, 1, 0), bind = { BackgroundColor3 = "bg" } }, body)
@@ -4019,7 +4009,6 @@ function lib:window(cfg)
 	corner(sb, radius)
 	mk("Frame", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), ZIndex = 5, BorderSizePixel = 0, Size = UDim2.new(0, radius, 1, 0), bind = { BackgroundColor3 = "side" } }, sb)
 	smoothdrag(sb, shell, nil, function(pos)
-		-- tabs must never move the window, not even through the sidebar catch-all
 		return not (win.tabs and inside(win.tabs, pos))
 	end)
 	local function isInteractiveAt(x, y)
@@ -4233,7 +4222,6 @@ end
 function lib:openericon(id) self.openericon = tostring(id) end
 function lib:setopener(b) self.opener = b and true or false end
 do
-	-- plain Frame, not CanvasGroup: a group rasterizes its text and icons into a blurry texture
 	local mroot = mk("Frame", {
 		Name = "yhMobile", BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 800,
 		Position = UDim2.fromScale(0, 0), Size = UDim2.fromScale(1, 1), Visible = false,
@@ -4252,7 +4240,6 @@ do
 		local capHeight = fontSize + 4
 		local top = math.floor((size - ic - capHeight - 4) / 2)
 		el.btn.Size = UDim2.fromOffset(size, size)
-		-- scale-based child layout: the press squish then shrinks icon+caption with the card instead of sliding them
 		el.pic.AnchorPoint = Vector2.new(0.5, 0)
 		el.pic.Position = UDim2.fromScale(0.5, top / size)
 		el.pic.Size = UDim2.fromScale(ic / size, ic / size)
