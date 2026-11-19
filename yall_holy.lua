@@ -5,6 +5,7 @@ local TextService = game:GetService("TextService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
+local GuiService = game:GetService("GuiService")
 local LP = Players.LocalPlayer
 
 local GAME_NAME = "game name"
@@ -116,7 +117,9 @@ local lib = {
 	icons = ICONS,
 	flags = {},
 	keybinds = {},
+	_toggles = {},
 	unloadhooks = {},
+	_pendingrestores = {},
 	conns = {},
 	wins = {},
 	dir = "yall holy",
@@ -127,8 +130,9 @@ local lib = {
 	tone = "Click",
 	tonelist = { "Click", "Bubble", "Soft" },
 	notices = true,
-	noticecap = 5,
+	noticecap = (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled) and 3 or 6,
 	hotkeys = true,
+	functions = false,
 	watermark = true,
 	hidenames = false,
 	title = "menu",
@@ -208,7 +212,8 @@ local function grad(p, rot, pts)
 	local g = p:FindFirstChild("ThemeGradient")
 	if g then
 		g:SetAttribute("BaseRotation", rot)
-		g.Rotation = rot + (lib.gradient and lib.gradientangle or 0)
+		g:SetAttribute("FixedRotation", true)
+		g.Rotation = rot
 		g.Transparency = ns(pts)
 		return g
 	end
@@ -301,7 +306,7 @@ function lib:_refreshtheme()
 			local color = THEME[key]
 			local finish = self.gradient and (key == "accent" and THEME.accent2 or color:Lerp(THEME.accent2, 0.035)) or color
 			g.Color = ColorSequence.new(color, finish)
-			g.Rotation = g:GetAttribute("BaseRotation") + (self.gradient and self.gradientangle or 0)
+			g.Rotation = g:GetAttribute("FixedRotation") and g:GetAttribute("BaseRotation") or (self.gradient and self.gradientangle or 0)
 		end
 	end
 	for i = #self._themeswatches, 1, -1 do
@@ -423,7 +428,7 @@ do
 end
 local gui = mk("ScreenGui", {
 	Name = GUI_NAME, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-	ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 1000,
+	ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 4,
 })
 pcall(function()
 	if protect_gui then protect_gui(gui) end
@@ -433,6 +438,8 @@ do
 	if not ok or not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
 end
 lib.scr = gui
+-- never hide on GuiService.MenuOpened: instead of disappearing, our low DisplayOrder
+-- keeps the library below Roblox's own menu overlay on both PC and phones
 local sounds = {}
 for _, n in ipairs({ "open", "click", "tick", "soft" }) do
 	sounds[n] = mk("Sound", { SoundId = "rbxasset://sounds/electronicpingshort.wav", Volume = 0.34, Name = randname() }, gui)
@@ -448,13 +455,12 @@ function lib:chime(kind)
 	s:Play()
 end
 local function mpos(input)
-	local o = (gui and gui.AbsolutePosition) or Vector2.new(0, 0)
 	if input and input.UserInputType == Enum.UserInputType.Touch then
 		local p = input.Position or Vector2.new(0, 0)
 		return Vector2.new(p.X, p.Y)
 	end
 	local m = UserInputService:GetMouseLocation()
-	return Vector2.new(m.X + o.X, m.Y + o.Y)
+	return Vector2.new(m.X, m.Y)
 end
 local function inside(f, pos)
 	if not f or not f.Parent then return false end
@@ -514,59 +520,62 @@ local function closepop(frame)
 		if e.frame == frame then closeto(i - 1) return end
 	end
 end
-local function placepop(frame, owner, alignleft)
-	local ap, as = owner.AbsolutePosition, owner.AbsoluteSize
+local function popbounds(owner)
+	for i = #stack, 1, -1 do
+		if owner:IsDescendantOf(stack[i].frame) then owner = stack[i].owner end
+	end
 	local off = gui.AbsolutePosition
 	local cam = workspace.CurrentCamera
 	local vs = (cam and cam.ViewportSize) or gui.AbsoluteSize
+	local left, top, right, bottom = 6, 6, vs.X - 6, vs.Y - 6
+	for _, win in ipairs(lib.wins) do
+		local shell = win.shell
+		if shell and shell.Parent and shell.Visible and owner:IsDescendantOf(shell) then
+			local pos, size = shell.AbsolutePosition - off, shell.AbsoluteSize
+			left, top = math.max(left, pos.X + 6), math.max(top, pos.Y + 6)
+			right, bottom = math.min(right, pos.X + size.X - 6), math.min(bottom, pos.Y + size.Y - 6)
+			break
+		end
+	end
+	return left, top, right, bottom
+end
+local function placepop(frame, owner, alignleft)
+	local ap, as = owner.AbsolutePosition, owner.AbsoluteSize
+	local off = gui.AbsolutePosition
 	local uis = frame:FindFirstChildOfClass("UIScale")
 	local usc = (uis and uis.Scale > 0) and uis.Scale or 1
 	local fw, fh = frame.AbsoluteSize.X / usc, frame.AbsoluteSize.Y / usc
 	if fw < 8 then fw = 180 end
 	if fh < 8 then fh = 60 end
+	local left, top, right, bottom = popbounds(owner)
 	local ox, oy = ap.X - off.X, ap.Y - off.Y
 	local x = alignleft and ox or (ox + as.X - fw)
-	local w2 = lib.focus
-	if w2 and w2.shell and w2.shell.Parent and w2.shell.Visible and (owner:IsDescendantOf(w2.shell) or w2.shell:IsDescendantOf(owner)) then
-		local wa = w2.shell.AbsolutePosition - off
-		local ww = w2.shell.AbsoluteSize.X
-		x = math.clamp(x, wa.X + 6, math.max(wa.X + 6, wa.X + ww - fw - 6))
-	end
-	x = math.clamp(x, 0, math.max(0, vs.X - fw))
 	local y = oy + as.Y + 4
-	if y + fh > vs.Y then y = math.max(0, oy - fh - 4) end
+	if y + fh > bottom then y = oy - fh - 4 end
+	x = math.clamp(x, left, math.max(left, right - fw))
+	y = math.clamp(y, top, math.max(top, bottom - fh))
 	frame.Position = UDim2.fromOffset(math.round(x), math.round(y))
 end
 local function placepopside(frame, owner, side, card)
 	local off = gui.AbsolutePosition
-	local cam = workspace.CurrentCamera
-	local vs = (cam and cam.ViewportSize) or gui.AbsoluteSize
 	local uis = frame:FindFirstChildOfClass("UIScale")
 	local usc = (uis and uis.Scale > 0) and uis.Scale or 1
 	local fw, fh = frame.AbsoluteSize.X / usc, frame.AbsoluteSize.Y / usc
 	if fw < 8 then fw = 180 end
 	if fh < 8 then fh = 60 end
+	local left, top, right, bottom = popbounds(owner)
 	local oa2, osz = owner.AbsolutePosition - off, owner.AbsoluteSize
 	local x
-	if side == "left" then
-		x = oa2.X + osz.X + 12
-	else
-		x = oa2.X - fw - 12
-	end
-	local w2 = lib.focus
-	if w2 and w2.shell and w2.shell.Parent and w2.shell.Visible and card and card:IsDescendantOf(w2.shell) then
-		local wa = w2.shell.AbsolutePosition - off
-		local ww = w2.shell.AbsoluteSize.X
-		x = math.clamp(x, wa.X + 6, math.max(wa.X + 6, wa.X + ww - fw - 6))
-	end
-	x = math.clamp(x, 0, math.max(0, vs.X - fw))
-	local y = owner.AbsolutePosition.Y - off.Y - 6
-	if y + fh > vs.Y then y = math.max(0, vs.Y - fh - 6) end
+	if side == "left" then x = oa2.X + osz.X + 12
+	else x = oa2.X - fw - 12 end
+	local y = oa2.Y - 6
+	x = math.clamp(x, left, math.max(left, right - fw))
+	y = math.clamp(y, top, math.max(top, bottom - fh))
 	frame.Position = UDim2.fromOffset(math.round(x), math.round(y))
 end
 local function popup_frame(w)
 	local f = mk("CanvasGroup", {
-		Visible = false, GroupTransparency = 1, ZIndex = 300, BorderSizePixel = 0,
+		Visible = false, GroupTransparency = 1, ZIndex = 1500, BorderSizePixel = 0,
 		Size = UDim2.fromOffset(w, 0), AutomaticSize = Enum.AutomaticSize.Y, bind = { BackgroundColor3 = "panel" },
 	}, gui)
 	corner(f, 8); stroke(f, "line", 0.35)
@@ -698,7 +707,7 @@ conn(UserInputService.InputBegan, function(input, gp)
 		if w.bind and input.KeyCode == w.bind then w:toggle() end
 	end
 	for _, el in ipairs(lib.keybinds) do
-		if el.value and el.value == input.KeyCode then
+		if el.value and el.value == input.KeyCode and not el.down then
 			el.down = true
 			if lib._hkpaint then lib._hkpaint() end
 			safe(el.callback, el.value)
@@ -716,12 +725,13 @@ conn(RunService.RenderStepped, function()
 	end
 end)
 local smoothers = {}
-local function dragto(handle, target, onclick, smooth)
+local function dragto(handle, target, onclick, smooth, guard)
 	handle.InputBegan:Connect(function(input)
 		local ty = input.UserInputType
 		if ty ~= Enum.UserInputType.MouseButton1 and ty ~= Enum.UserInputType.Touch then return end
 		if #stack > 0 then return end
 		local start = mpos(input)
+		if guard and not guard(start) then return end
 		local p = target.Position
 		local ox, oy, sx, sy = p.X.Offset, p.Y.Offset, p.X.Scale, p.Y.Scale
 		local as = target.AbsoluteSize
@@ -752,7 +762,7 @@ local function dragto(handle, target, onclick, smooth)
 	end)
 end
 local function fastdrag(handle, target, onclick) dragto(handle, target, onclick, true) end
-smoothdrag = function(handle, target, onclick) dragto(handle, target, onclick, true) end
+smoothdrag = function(handle, target, onclick, guard) dragto(handle, target, onclick, true, guard) end
 conn(RunService.RenderStepped, function(dt)
 	for target, m in pairs(smoothers) do
 		if not target.Parent then
@@ -782,10 +792,16 @@ local function container_new(parent, ctx)
 		else
 			r = mk("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, h), LayoutOrder = n, ZIndex = 5 }, parent)
 		end
+		local entry
 		if ctx.pg then
-			ctx.pg.elems[#ctx.pg.elems + 1] = { name = string.lower(name or ""), frame = r, card = ctx.card }
+			entry = { name = string.lower(name or ""), terms = string.lower(name or ""), frame = r, display = r, card = ctx.card, pg = ctx.pg, tab = ctx.pg.tab }
+			ctx.pg.elems[#ctx.pg.elems + 1] = entry
+		elseif c._owner and c._owner._location then
+			local owner = c._owner._location
+			entry = { name = string.lower(name or ""), terms = string.lower(name or ""), frame = r, display = owner.display or owner.frame, card = owner.card, pg = owner.pg, tab = owner.tab, popup = true, owner = c._owner }
+			owner.pg.elems[#owner.pg.elems + 1] = entry
 		end
-		return r
+		return r, entry
 	end
 	local function done(cfg, el)
 		if cfg.flag then
@@ -809,8 +825,8 @@ local function container_new(parent, ctx)
 			if el.bind.mode == "hold" then
 				if kind == "toggle" then
 					el:set(pressed and true or false)
-				else
-					safe(el.callback, pressed and true or false)
+				elseif pressed then
+					safe(el.callback)
 				end
 			elseif kind == "toggle" then
 				if pressed then el:set(not el:get()) end
@@ -820,6 +836,7 @@ local function container_new(parent, ctx)
 		end
 		el.callback = el.callback or function() end
 		local hud = { value = nil, name = name or "bind", mode = el.bind.mode, callback = fire, down = false }
+		if kind == "toggle" then function hud.active() return el:get() end end
 		function hud.setkey(k)
 			el.bind.key = k
 			hud.value = k
@@ -831,17 +848,16 @@ local function container_new(parent, ctx)
 		pad(pop, 14, 14, 14, 14); vlist(pop, 10)
 		lbl(pop, { Text = tostring(name or "bind"), LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 18), TextSize = 13, ZIndex = 301 })
 		local brow = mk("CanvasGroup", { LayoutOrder = 2, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 26), ZIndex = 301 }, pop)
-		mk("UIPadding", { PaddingTop = UDim.new(0, 0) }, brow)
-		local bx = mk("Frame", { Position = UDim2.fromOffset(0, 5), Size = UDim2.fromOffset(15, 15), ZIndex = 302, BorderSizePixel = 0, bind = { BackgroundColor3 = "head" } }, brow)
+		local bx = mk("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 8, 0.5, 0), Size = UDim2.fromOffset(15, 15), ZIndex = 302, BorderSizePixel = 0, bind = { BackgroundColor3 = "head" } }, brow)
 		corner(bx, 4); stroke(bx, "line", 0.2)
 		local tick = img(bx, {
 			Image = icon("check"), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
 			Size = UDim2.fromOffset(11, 11), ZIndex = 303, ImageColor3 = THEME.bg, ImageTransparency = 1,
 		})
-		lbl(brow, { Text = "bind", Position = UDim2.fromOffset(22, 6), Size = UDim2.fromOffset(30, 14), TextSize = 10, TextColor3 = THEME.dim, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 302 })
+		lbl(brow, { Text = "bind", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 30, 0.5, 0), Size = UDim2.fromOffset(26, 14), TextSize = 10, TextColor3 = THEME.dim, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 302 })
 		local keybox = mk("TextButton", {
 			AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -26, 0, 2), Size = UDim2.fromOffset(88, 22), Text = "None",
-			Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = THEME.text, ZIndex = 302, BorderSizePixel = 0, AutoButtonColor = false,
+			Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = THEME.text, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 302, BorderSizePixel = 0, AutoButtonColor = false,
 			bind = { BackgroundColor3 = "head" },
 		}, brow)
 		corner(keybox, 6); stroke(keybox, "line", 0.35)
@@ -853,7 +869,7 @@ local function container_new(parent, ctx)
 			Image = icon("trash-2"), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
 			Size = UDim2.fromOffset(13, 13), ZIndex = 303, ImageColor3 = THEME.dim, ImageTransparency = 0.3,
 		})
-		local bxhit = mk("TextButton", { Text = "", BackgroundTransparency = 1, Position = UDim2.fromOffset(-2, 0), Size = UDim2.fromOffset(22, 26), ZIndex = 304, AutoButtonColor = false }, brow)
+		local bxhit = mk("TextButton", { Text = "", BackgroundTransparency = 1, Position = UDim2.fromOffset(8, 0), Size = UDim2.fromOffset(20, 26), ZIndex = 304, AutoButtonColor = false }, brow)
 		local function paintbox()
 			local on = (kind == "toggle") and el:get() or false
 			tw(bx, { BackgroundColor3 = on and THEME.accent or THEME.head }, NOW)
@@ -873,7 +889,6 @@ local function container_new(parent, ctx)
 			click()
 		end)
 		local mrow = mk("CanvasGroup", { LayoutOrder = 3, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 26), ZIndex = 301 }, pop)
-		mk("UIPadding", { PaddingTop = UDim.new(0, 0) }, mrow)
 		mk("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, mrow)
 		local mbtns = {}
 		for i, m in ipairs({ "toggle", "hold" }) do
@@ -935,7 +950,7 @@ local function container_new(parent, ctx)
 	end
 	function c:toggle(cfg)
 		cfg = cfg or {}
-		local r = row(26, cfg.name)
+		local r, location = row(26, cfg.name)
 		local box = mk("Frame", {
 			AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 5, 0.5, 0), Size = UDim2.fromOffset(16, 16),
 			ZIndex = 6, BorderSizePixel = 0, BackgroundTransparency = 1, bind = { BackgroundColor3 = "accent" },
@@ -954,7 +969,8 @@ local function container_new(parent, ctx)
 			Size = UDim2.fromScale(1, 1), ZIndex = 8, BackgroundTransparency = 1, ImageTransparency = 1,
 			AutoButtonColor = false, Selectable = false,
 		}, r)
-		local el = { value = false, callback = cfg.callback }
+		local el = { value = false, callback = cfg.callback, name = cfg.name or "toggle", dangerous = cfg.dangerous == true or type(cfg.dangerous) == "string", warning = type(cfg.dangerous) == "string" and cfg.dangerous or cfg.warning, __frame = r, _location = location }
+		if location then location.el = el end
 		local hover = false
 		local function paint(anim)
 			local info = anim and EASE or NOW
@@ -967,6 +983,7 @@ local function container_new(parent, ctx)
 		reapply[#reapply + 1] = function() paint(false) end
 		function el:get() return el.value end
 		function el:set(v, silent)
+			lib:_cancelrestore(el)
 			v = v and true or false
 			if v == el.value then return end
 			el.value = v
@@ -975,6 +992,8 @@ local function container_new(parent, ctx)
 				local ok, res = pcall(el.callback, v)
 				if ok and res == false then el.value = not v; paint(true) end
 			end
+			if lib._hkpaint then lib._hkpaint() end
+			if lib._fnrefresh then lib._fnrefresh() end
 		end
 		hit.MouseEnter:Connect(function() hover = true; if not el.value then paint(true) end end)
 		hit.MouseLeave:Connect(function() hover = false; if not el.value then paint(true) end end)
@@ -993,18 +1012,29 @@ local function container_new(parent, ctx)
 			el.options._owner = el
 			gear.MouseEnter:Connect(function() tw(gear, { BackgroundTransparency = 0.4, ImageColor3 = THEME.text, ImageTransparency = 0 }) end)
 			gear.MouseLeave:Connect(function() tw(gear, { BackgroundTransparency = 1, ImageColor3 = THEME.dim, ImageTransparency = 0.35 }) end)
-			gear.MouseButton1Click:Connect(function()
-				if ispop(holder) then closepop(holder) return end
+			function el._openoptions()
+				if ispop(holder) then return end
 				popshow(holder)
 				openpop(holder, gear, function() pophide(holder) end, nil, c.side, c.card)
 				task.defer(placepopside, holder, gear, c.side, c.card)
+			end
+			gear.MouseButton1Click:Connect(function()
+				if ispop(holder) then closepop(holder) else el._openoptions() end
 			end)
 		end
 		if cfg.default then
-			el.value = true
-			task.defer(safe, el.callback, true)
+			if el.dangerous then
+				task.defer(function() if lib.alive and not lib._pendingrestores[el] then lib:_restoretoggle(el) end end)
+			else
+				el.value = true
+				task.defer(safe, el.callback, true)
+			end
 		end
 		paint(false)
+		if cfg.hud ~= false then
+			lib._toggles[#lib._toggles + 1] = el
+			if lib._fnrefresh then lib._fnrefresh() end
+		end
 		return done(cfg, el)
 	end
 	function c:checkbox(cfg)
@@ -1080,7 +1110,16 @@ local function container_new(parent, ctx)
 		cfg = cfg or {}
 		local multi = cfg.multi and true or false
 		local el = { list = cfg.list or {}, multi = multi, callback = cfg.callback }
-		local r = row(26, cfg.name)
+		local r, location = row(26, cfg.name or "dropdown")
+		el._location = location
+		if location then location.el = el end
+		local function searchterms()
+			if not location then return end
+			local terms = { cfg.name or "dropdown" }
+			for _, value in ipairs(el.list) do terms[#terms + 1] = tostring(value) end
+			location.terms = string.lower(table.concat(terms, " "))
+		end
+		searchterms()
 		local boxw = 0
 		if not multi then
 			local longest = 0
@@ -1148,7 +1187,9 @@ local function container_new(parent, ctx)
 			elseif sel ~= nil and not table.find(el.list, sel) then
 				sel = el.list[1]
 			end
+			searchterms()
 			refresh()
+			if location and location.pg.win._searchquery ~= "" and lib._applysearch then lib:_applysearch(location.pg.win, location.pg.win._searchquery) end
 		end
 		local pop
 		local function build()
@@ -1341,7 +1382,7 @@ local function container_new(parent, ctx)
 			callback = function(nme) if nme ~= "Custom" then lib:settheme(nme) end end,
 		})
 		e.gradient = self:checkbox({
-			name = "Gradient",
+			name = "Gradient", hud = false,
 			callback = function(on) lib:setgradient(on) end,
 		})
 		e.angle = self:slider({
@@ -1531,7 +1572,7 @@ local function container_new(parent, ctx)
 			lbl(r, { Text = cfg.name, Position = UDim2.fromOffset(5, 0), Size = UDim2.new(1, -10, 0, 18), TextSize = 12, TextColor3 = THEME.dim, TextTransparency = 0.15 })
 		end
 		local tb = mk("TextBox", {
-			AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 5, 1, hasname and 0 or -1), 			Size = UDim2.new(1, -(bw + 16), 0, 28),
+			AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 5, 1, hasname and 0 or -1), Size = UDim2.new(1, -(bw + 16), 0, 28),
 			Text = tostring(cfg.default or ""), PlaceholderText = cfg.placeholder or "", ClearTextOnFocus = cfg.clearonfocus and true or false,
 			Font = Enum.Font.GothamMedium, TextSize = 12, ZIndex = 6, BorderSizePixel = 0, TextXAlignment = Enum.TextXAlignment.Left,
 			bind = { BackgroundColor3 = "head", TextColor3 = "text", PlaceholderColor3 = "dim" },
@@ -1540,11 +1581,21 @@ local function container_new(parent, ctx)
 		local st = stroke(tb, "line", 0.5)
 		tb.Focused:Connect(function() tw(st, { Transparency = 0.25 }) end)
 		local b = mk("TextButton", {
-			AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -5, 1, (hasname and 0 or -1) - 3), Size = UDim2.fromOffset(bw, 22),
+			AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -5, 1, hasname and 0 or -1), Size = UDim2.fromOffset(bw, 28),
 			Text = tostring(cfg.button or "go"), Font = Enum.Font.GothamBold, TextSize = 11, ZIndex = 6,
 			BorderSizePixel = 0, AutoButtonColor = false, bind = { BackgroundColor3 = "head", TextColor3 = "text" },
 		}, r)
-		corner(b, 6); stroke(b, "line", 0.5)
+		corner(b, 6)
+		local bst = stroke(b, "line", 0.5)
+		local hover = false
+		local function paintbutton(anim)
+			local info = anim == false and NOW or FAST
+			tw(b, { BackgroundColor3 = THEME.head:Lerp(THEME.accent, hover and 0.12 or 0), TextColor3 = THEME.text }, info)
+			tw(bst, { Color = hover and THEME.accent or THEME.line, Transparency = hover and 0.2 or 0.5 }, info)
+		end
+		b.MouseEnter:Connect(function() hover = true; paintbutton(true) end)
+		b.MouseLeave:Connect(function() hover = false; paintbutton(true) end)
+		reapply[#reapply + 1] = function() paintbutton(false) end
 		local el = { value = tb.Text, callback = cfg.callback, box = tb, button = b }
 		tb.FocusLost:Connect(function()
 			tw(st, { Transparency = 0.5 })
@@ -1625,11 +1676,12 @@ local function vsep(parent, order)
 	grad(l, 90, { { 0, 0.85 }, { 0.5, 0 }, { 1, 0.85 } })
 end
 local hkroot = mk("CanvasGroup", {
-	AnchorPoint = Vector2.new(0, 0.5), BackgroundTransparency = 1, Position = UDim2.new(0, 8, 0.5, 0), BorderSizePixel = 0,
-	ZIndex = 900, AutomaticSize = Enum.AutomaticSize.XY, Size = UDim2.fromOffset(0, 0), Visible = false, GroupTransparency = 1,
+	Name = "HotkeysHUD", AnchorPoint = Vector2.new(0, 0.5), BackgroundTransparency = 1, Position = UDim2.new(0, 8, 0.5, 0), BorderSizePixel = 0,
+	ZIndex = 2000, AutomaticSize = Enum.AutomaticSize.XY, Size = UDim2.fromOffset(0, 0), Visible = false, GroupTransparency = 1,
 }, gui)
-mk("UIListLayout", { Padding = UDim.new(0, 3), FillDirection = Enum.FillDirection.Vertical, HorizontalAlignment = Enum.HorizontalAlignment.Left, SortOrder = Enum.SortOrder.LayoutOrder }, hkroot)
+mk("UIListLayout", { Padding = UDim.new(0, 7), FillDirection = Enum.FillDirection.Vertical, HorizontalAlignment = Enum.HorizontalAlignment.Left, SortOrder = Enum.SortOrder.LayoutOrder }, hkroot)
 pad(hkroot, 10, 10, 10, 10)
+mk("UIScale", { Scale = lib.mobile and 0.8 or 1 }, hkroot)
 do
 	local tw_ = tsize("hotkeys", 14, Enum.Font.GothamBold).X
 	local hp = glass(hkroot, { LayoutOrder = 0, Size = UDim2.fromOffset(53 + math.ceil(tw_), 36) })
@@ -1647,7 +1699,11 @@ local hkrows = {}
 local hkListening = nil
 function lib._hkpaint()
 	for el, r in pairs(hkrows) do
-		tw(r.name, { TextColor3 = el.down and THEME.accent or THEME.text }, FAST)
+		local on = el.down
+		if el.active then on = el.active() end
+		tw(r.name, { TextColor3 = on and THEME.accent or THEME.dim, TextTransparency = on and 0 or 0.15 }, FAST)
+		tw(r.chip, { TextColor3 = on and THEME.accent or THEME.dim }, FAST)
+		tw(r.stroke, { Color = THEME.line, Transparency = 0.45 }, FAST)
 	end
 end
 local function hkchip(el, inner, order)
@@ -1693,14 +1749,111 @@ function lib._hkrefresh()
 			}, f)
 			hit.MouseButton1Click:Connect(function() hklisten(el, chip) end)
 			fastdrag(hit, hkroot)
-			hkrows[el] = { frame = f, name = n }
+			hkrows[el] = { frame = f, name = n, chip = chip, stroke = f:FindFirstChildOfClass("UIStroke") }
 		end
 	end
 	local show = lib.hotkeys and count > 0
 	hkroot.GroupTransparency = show and 0 or 1
 	hkroot.Visible = show
+	lib._hkpaint()
 end
 function lib:sethotkeys(b) self.hotkeys = b and true or false; self._hkrefresh() end
+reapply[#reapply + 1] = function() lib._hkpaint() end
+
+do
+local function flashcontrol(frame)
+	if not frame or not frame.Parent then return end
+	local old = frame:FindFirstChild("SearchHighlight")
+	if old then old:Destroy() end
+	local glow = mk("Frame", {
+		Name = "SearchHighlight", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1),
+		ZIndex = 5, BorderSizePixel = 0, Active = false, bind = { BackgroundColor3 = "accent" },
+	}, frame)
+	corner(glow, 6)
+	local outline = stroke(glow, "accent", 1, 2)
+	tw(glow, { BackgroundTransparency = 0.82 }, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+	tw(outline, { Transparency = 0.08 }, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+	task.delay(1.1, function()
+		if not glow.Parent then return end
+		tw(glow, { BackgroundTransparency = 1 }, FAST)
+		tw(outline, { Transparency = 1 }, FAST)
+		task.delay(0.14, function() if glow.Parent then glow:Destroy() end end)
+	end)
+end
+function lib:_locatecontrol(el)
+	local loc = el and el._location
+	if not loc or not loc.pg or not loc.tab then return false end
+	local win = loc.pg.win
+	if self._applysearch then self:_applysearch(win, "") end
+	for _, pg in ipairs(win._pages) do if pg._closesearch then pg._closesearch() end end
+	win:toggle(true)
+	win:select(loc.tab)
+	task.delay(0.16, function()
+		if not self.alive or not loc.card or not loc.card.Parent then return end
+		local scroll = loc.card.Parent
+		if scroll:IsA("ScrollingFrame") then
+			local y = loc.card.AbsolutePosition.Y - scroll.AbsolutePosition.Y + scroll.CanvasPosition.Y - 8
+			local maxy = math.max(0, scroll.AbsoluteCanvasSize.Y - scroll.AbsoluteWindowSize.Y)
+			tw(scroll, { CanvasPosition = Vector2.new(0, math.clamp(y, 0, maxy)) }, TweenInfo.new(0.28, Enum.EasingStyle.Quart, Enum.EasingDirection.Out))
+		end
+		if loc.popup and loc.owner and loc.owner._openoptions then
+			loc.owner._openoptions()
+			task.delay(0.12, function() flashcontrol(loc.frame) end)
+		else
+			flashcontrol(loc.frame)
+		end
+	end)
+	return true
+end
+end
+
+do
+	local fnroot = mk("CanvasGroup", {
+		Name = "EnabledFunctionsHUD", AnchorPoint = Vector2.new(1, 0.5), BackgroundTransparency = 1,
+		Position = UDim2.new(1, -8, 0.5, 0), BorderSizePixel = 0, ZIndex = 2000,
+		AutomaticSize = Enum.AutomaticSize.XY, Size = UDim2.fromOffset(0, 0), Visible = false, GroupTransparency = 1,
+	}, gui)
+	mk("UIListLayout", { Padding = UDim.new(0, 7), FillDirection = Enum.FillDirection.Vertical, HorizontalAlignment = Enum.HorizontalAlignment.Right, SortOrder = Enum.SortOrder.LayoutOrder }, fnroot)
+	pad(fnroot, 10, 10, 10, 10)
+	local header = glass(fnroot, { LayoutOrder = 0, Size = UDim2.fromOffset(53 + math.ceil(tsize("enabled functions", 14, Enum.Font.GothamMedium).X), 36) })
+	fastdrag(header, fnroot)
+	local inner = mk("Frame", { BackgroundTransparency = 1, ZIndex = 3, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1) }, header)
+	pad(inner, 14, 14, 0, 0)
+	mk("UIListLayout", { VerticalAlignment = Enum.VerticalAlignment.Center, FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Center, Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, inner)
+	img(inner, { Image = icon("power"), LayoutOrder = 1, ZIndex = 4, Size = UDim2.fromOffset(17, 17), bind = { ImageColor3 = "text" } })
+	lbl(inner, { Text = "enabled functions", LayoutOrder = 2, Font = Enum.Font.GothamMedium, TextSize = 14, ZIndex = 4, AutomaticSize = Enum.AutomaticSize.X, Size = UDim2.fromOffset(0, 20), TextTruncate = Enum.TextTruncate.None, bind = { TextColor3 = "text" } })
+	local rows = {}
+	local function action(parent, image, offset, hover, callback)
+		local button = mk("ImageButton", {
+			AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -offset, 0.5, 0), Size = UDim2.fromOffset(18, 18),
+			BackgroundTransparency = 1, Image = icon(image), ImageColor3 = THEME.dim, ImageTransparency = 0.25,
+			ScaleType = Enum.ScaleType.Fit, ZIndex = 7, AutoButtonColor = false, Selectable = false,
+		}, parent)
+		button.MouseEnter:Connect(function() tw(button, { ImageColor3 = hover, ImageTransparency = 0 }, FAST) end)
+		button.MouseLeave:Connect(function() tw(button, { ImageColor3 = THEME.dim, ImageTransparency = 0.25 }, FAST) end)
+		button.MouseButton1Click:Connect(function() lib:chime("click"); callback() end)
+		return button
+	end
+	function lib._fnrefresh()
+		for _, frame in ipairs(rows) do frame:Destroy() end
+		table.clear(rows)
+		for _, el in ipairs(lib._toggles) do
+			if el:get() then
+				local width = math.min(72 + math.ceil(tsize(el.name, 13, Enum.Font.GothamMedium).X), gui.AbsoluteSize.X - 36)
+				local f = glass(fnroot, { LayoutOrder = #rows + 1, Size = UDim2.fromOffset(width, 30) })
+				fastdrag(f, fnroot)
+				lbl(f, { Text = el.name, Position = UDim2.fromOffset(13, 0), Size = UDim2.new(1, -70, 1, 0), Font = Enum.Font.GothamMedium, TextSize = 13, ZIndex = 4, bind = { TextColor3 = "text" } })
+				action(f, "search", 32, THEME.text, function() lib:_locatecontrol(el) end)
+				action(f, "x", 8, Color3.fromRGB(255, 92, 92), function() el:set(false) end)
+				rows[#rows + 1] = f
+			end
+		end
+		local show = lib.functions and #rows > 0
+		fnroot.GroupTransparency = show and 0 or 1
+		fnroot.Visible = show
+	end
+	function lib:setfunctions(b) self.functions = b and true or false; self._fnrefresh() end
+end
 local MASKPAD = 4
 -- roblox has no per-label blur, so privacy is a plain dash line sized to the nick
 local MASK_CH = "—"
@@ -1781,13 +1934,14 @@ function lib:setnameprivate(v)
 end
 local wmroot = mk("CanvasGroup", {
 	AnchorPoint = Vector2.new(1, 0), BackgroundTransparency = 1, Position = UDim2.new(1, -8, 0, 8), BorderSizePixel = 0,
-	ZIndex = 900, AutomaticSize = Enum.AutomaticSize.XY, Size = UDim2.fromOffset(0, 0), Visible = false, GroupTransparency = 1,
+	ZIndex = 2000, AutomaticSize = Enum.AutomaticSize.XY, Size = UDim2.fromOffset(0, 0), Visible = false, GroupTransparency = 1,
 }, gui)
 mk("UIListLayout", {
 	VerticalAlignment = Enum.VerticalAlignment.Center, FillDirection = Enum.FillDirection.Horizontal,
 	HorizontalAlignment = Enum.HorizontalAlignment.Right, Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder,
 }, wmroot)
 pad(wmroot, 10, 10, 10, 10)
+mk("UIScale", { Scale = lib.mobile and 0.8 or 1 }, wmroot)
 local wm_title
 do
 	local f = glass(wmroot, { LayoutOrder = 1, Size = UDim2.fromOffset(0, 30), AutomaticSize = Enum.AutomaticSize.X })
@@ -1881,26 +2035,62 @@ function lib:retitle(t) self.title = tostring(t); wm_title.Text = self.title end
 function lib:setsound(b) self.sound = b and true or false end
 function lib:settone(n) if TONEMUL[n] then self.tone = n end end
 function lib:setnotices(b) self.notices = b and true or false end
+function lib:_getnoticecap()
+	if self.mobile then return 3 end
+	return tonumber(self.noticecap) or 6
+end
+function lib:setnoticecap(n)
+	self.noticecap = tonumber(n) or (self.mobile and 3 or 6)
+end
 local nroot = mk("Frame", {
-	Name = randname(), Position = UDim2.fromOffset(18, 110), BackgroundTransparency = 1, ZIndex = 400,
+	Name = randname(), Position = UDim2.fromOffset(18, 110), BackgroundTransparency = 1, ZIndex = 900,
 	AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.fromOffset(268, 0),
 }, gui)
 mk("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, nroot)
-local nlist, nseq = {}, 0
+local nlist, nqueue, nseq = {}, {}, 0
+function lib:_nextnotice()
+	if not self.alive then return end
+	local cap = self:_getnoticecap()
+	local active = 0
+	for _, e in ipairs(nlist) do if e.required then active = active + 1 end end
+	if active >= cap or #nqueue == 0 then return end
+	local queued = table.remove(nqueue, 1)
+	queued.live = self:notify(queued.cfg)
+end
 function lib:notify(cfg)
-	if not self.notices or not self.alive then return end
 	cfg = cfg or {}
+	if not self.alive or (not self.notices and not cfg.required) then return end
+	if cfg.required then
+		local cap = self:_getnoticecap()
+		local active = 0
+		for _, e in ipairs(nlist) do if e.required then active = active + 1 end end
+		if active >= cap then
+			local queued = { cfg = cfg }
+			queued.dismiss = function(reason)
+				if queued.live then queued.live.dismiss(reason) return end
+				for i, e in ipairs(nqueue) do
+					if e == queued then table.remove(nqueue, i); safe(cfg.ondismiss, reason or "dismiss"); break end
+				end
+			end
+			nqueue[#nqueue + 1] = queued
+			return queued
+		end
+	end
 	local title, body = tostring(cfg.title or ""), tostring(cfg.text or "")
-	local life = tonumber(cfg.life) or 5
+	local life = math.max(1, tonumber(cfg.life) or 5)
 	local ic = icon(cfg.icon or "info")
-	local W = 268
-	local tx = 14 + (ic ~= "" and 26 or 0)
-	local avail = W - tx - 14
-	local th = tsize(title, 13, Enum.Font.GothamBold, avail).Y
+	local phone = self.mobile and true or false
+	local W = phone and 212 or 268
+	local ts, bs = phone and 12 or 13, phone and 10 or 11
+	local pad = phone and 10 or 14
+	local isz = phone and 14 or 18
+	local tx = pad + (ic ~= "" and isz + 8 or 0)
+	local avail = W - tx - pad
+	local th = tsize(title, ts, Enum.Font.GothamBold, avail).Y
 	local btxt = body ~= "" and body or " "
-	local bh = tsize(btxt, 11, Enum.Font.GothamMedium, avail).Y
-	local ah = type(cfg.callback) == "function" and 15 or 0
-	local H = math.max(56, 24 + th + 3 + bh + ah)
+	local bh = tsize(btxt, bs, Enum.Font.GothamMedium, avail).Y
+	local ah = type(cfg.callback) == "function" and (phone and 16 or 20) or 0
+	local H = math.max(phone and 44 or 56, (phone and 18 or 24) + th + 3 + bh + ah)
 	nseq = nseq + 1
 	local holder = mk("Frame", { LayoutOrder = nseq, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), ZIndex = 400 }, nroot)
 	local slide = mk("Frame", { BackgroundTransparency = 1, Size = UDim2.fromOffset(W, H), Position = UDim2.fromOffset(-W - 40, 0), ZIndex = 400 }, holder)
@@ -1908,47 +2098,72 @@ function lib:notify(cfg)
 	local f = glass(slide, { Size = UDim2.fromOffset(W, H), ZIndex = 401 })
 	local inner = mk("Frame", { BackgroundTransparency = 1, ZIndex = 403, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1) }, f)
 	if ic ~= "" then
-		img(inner, { Image = ic, AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0), Size = UDim2.fromOffset(18, 18), ZIndex = 404, ImageColor3 = cfg.tone or THEME.text })
+		img(inner, { Image = ic, AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, pad, 0.5, 0), Size = UDim2.fromOffset(isz, isz), ZIndex = 404, ImageColor3 = cfg.tone or THEME.text })
 	end
-	lbl(inner, { Text = title, Position = UDim2.fromOffset(tx, 12), Size = UDim2.fromOffset(avail, th), TextSize = 13, ZIndex = 404, TextWrapped = true, TextTruncate = Enum.TextTruncate.None })
-	lbl(inner, { Text = btxt, Position = UDim2.fromOffset(tx, 15 + th), Size = UDim2.fromOffset(avail, bh), Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = THEME.dim, ZIndex = 404, TextWrapped = true, TextTruncate = Enum.TextTruncate.None, TextYAlignment = Enum.TextYAlignment.Top })
+	lbl(inner, { Text = title, Position = UDim2.fromOffset(tx, phone and 9 or 12), Size = UDim2.fromOffset(avail, th), TextSize = ts, TextColor3 = cfg.tone or THEME.text, ZIndex = 404, TextWrapped = true, TextTruncate = Enum.TextTruncate.None })
+	lbl(inner, { Text = btxt, Position = UDim2.fromOffset(tx, (phone and 11 or 15) + th), Size = UDim2.fromOffset(avail, bh), Font = Enum.Font.GothamMedium, TextSize = bs, TextColor3 = THEME.dim, ZIndex = 404, TextWrapped = true, TextTruncate = Enum.TextTruncate.None, TextYAlignment = Enum.TextYAlignment.Top })
 	local bar = mk("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 0, 1, 0), Size = UDim2.new(1, 0, 0, 2), ZIndex = 405, BorderSizePixel = 0, BackgroundTransparency = 0.35, BackgroundColor3 = cfg.tone or THEME.accent }, f)
-	local dead = false
-	local entry = {}
-	local function dismiss()
+	local dead, moved = false, false
+	local entry = { required = cfg.required, frame = f }
+	local function dismiss(reason)
 		if dead then return end
 		dead = true
-		for i, e in ipairs(nlist) do if e == entry then table.remove(nlist, i) break end end
-		tw(slide, { Position = UDim2.fromOffset(-W - 40, 0) }, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.In))
-		task.delay(0.22, function()
-			tw(holder, { Size = UDim2.new(1, 0, 0, 0) }, TweenInfo.new(0.28, Enum.EasingStyle.Quart, Enum.EasingDirection.Out))
-			task.delay(0.3, function() holder:Destroy() end)
+		for i, e in ipairs(nlist) do if e == entry then table.remove(nlist, i); break end end
+		safe(cfg.ondismiss, reason or "dismiss")
+		tw(slide, { Position = UDim2.fromOffset(-W - 40, 0) }, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut))
+		task.delay(0.06, function()
+			if not holder.Parent then return end
+			tw(holder, { Size = UDim2.new(1, 0, 0, 0) }, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+			task.delay(0.2, function() holder:Destroy() end)
 		end)
+		task.defer(function() self:_nextnotice() end)
 	end
 	entry.dismiss = dismiss
 	if ah > 0 then
-		local act = tostring(cfg.action or "click to run")
-		local astr = "  " .. act
 		lbl(inner, {
-			Text = astr, Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = THEME.accent, ZIndex = 406,
-			AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -12, 1, -6), Size = UDim2.fromOffset(tsize(astr, 10, Enum.Font.GothamBold).X, 13),
-			TextXAlignment = Enum.TextXAlignment.Left,
+			Text = tostring(cfg.action or "click to run"), Font = Enum.Font.GothamBold, TextSize = phone and 9 or 10, TextColor3 = cfg.tone or THEME.accent, ZIndex = 406,
+			Position = UDim2.fromOffset(tx, H - (phone and 19 or 23)), Size = UDim2.fromOffset(avail, phone and 12 or 15), TextXAlignment = Enum.TextXAlignment.Left,
 		})
-		local hit = mk("TextButton", {
-			Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, AutoButtonColor = false, ZIndex = 407,
-		}, f)
-		hit.MouseButton1Click:Connect(function()
-			dismiss()
-			safe(cfg.callback)
-		end)
 	end
+	local hit = mk("TextButton", { Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, AutoButtonColor = false, ZIndex = 407 }, f)
+	entry.button = hit
+	hit.InputBegan:Connect(function(input)
+		if dead or (input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch) then return end
+		local origin, delta = mpos(input), Vector2.zero
+		moved = false
+		startdrag(function(pos)
+			if dead then return end
+			delta = pos - origin
+			if delta.Magnitude > 7 then moved = true end
+			tw(slide, { Position = UDim2.fromOffset(math.min(0, delta.X), 0) }, NOW)
+		end, function()
+			if dead then return end
+			if delta.X < -W * 0.22 and math.abs(delta.X) > math.abs(delta.Y) then
+				dismiss("swipe")
+			else
+				tw(slide, { Position = UDim2.fromOffset(0, 0) }, FAST)
+			end
+		end)
+	end)
+	hit.Activated:Connect(function()
+		if dead or moved or ah == 0 then return end
+		dismiss("action")
+		safe(cfg.callback)
+	end)
 	nlist[#nlist + 1] = entry
 	tw(holder, { Size = UDim2.new(1, 0, 0, H + 8) }, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out))
 	tw(slide, { Position = UDim2.fromOffset(0, 0) }, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out))
 	tw(bar, { Size = UDim2.new(0, 0, 0, 2) }, TweenInfo.new(life, Enum.EasingStyle.Linear))
-	task.delay(life, dismiss)
-	while #nlist > self.noticecap do nlist[1].dismiss() end
+	task.delay(life, function() dismiss("timeout") end)
+	local cap = self:_getnoticecap()
+	while #nlist > cap do
+		local oldest
+		for _, e in ipairs(nlist) do if not e.required then oldest = e; break end end
+		if not oldest then break end
+		oldest.dismiss("capacity")
+	end
 	self:chime("soft")
+	return entry
 end
 closemodal = function(animate)
 	if not modal then return end
@@ -1968,7 +2183,7 @@ end
 local function openmodal(cfg, withinput)
 	closemodal()
 	cfg = cfg or {}
-	local ov = mk("TextButton", { Text = "", AutoButtonColor = false, Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 500, BorderSizePixel = 0, bind = { BackgroundColor3 = "bg" } }, gui)
+	local ov = mk("TextButton", { Text = "", AutoButtonColor = false, Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 1600, BorderSizePixel = 0, bind = { BackgroundColor3 = "bg" } }, gui)
 	modal = ov
 	modalbox = nil
 	local box = mk("CanvasGroup", {
@@ -2069,6 +2284,44 @@ local function fsok(name)
 	end
 	return nil
 end
+function lib:openurl(url)
+	if type(url) ~= "string" or not url:match("^https://[%w%.%-]+/") or url:find("[%c%s]") then return false, "invalid URL" end
+	local last = "browser API unavailable"
+	for _, name in ipairs({ "open_url", "openbrowser", "openurl" }) do
+		local fn = fsok(name)
+		if fn then
+			local ok, result = pcall(fn, url)
+			if ok and result ~= false then return true end
+			last = tostring(result)
+		end
+	end
+	do
+		local ok, result = pcall(function() return game:GetService("LinkingService"):OpenUrl(url) end)
+		if ok and result == true then return true end
+		if not ok then last = tostring(result) end
+	end
+	for _, name in ipairs({ "GuiService", "BrowserService" }) do
+		local ok, result = pcall(function() return game:GetService(name):OpenBrowserWindow(url) end)
+		if ok and result ~= false then return true end
+		last = tostring(result)
+	end
+	return false, last
+end
+function lib:copy(text)
+	text = tostring(text or "")
+	local fn = (type(setclipboard) == "function" and setclipboard)
+		or (type(toclipboard) == "function" and toclipboard)
+		or (type(set_clipboard) == "function" and set_clipboard)
+		or fsok("setclipboard")
+		or fsok("toclipboard")
+		or (Clipboard and type(Clipboard.set) == "function" and Clipboard.set)
+		or (syn and type(syn.write_clipboard) == "function" and syn.write_clipboard)
+	if fn then
+		local ok = pcall(fn, text)
+		return ok
+	end
+	return false
+end
 local function ser(v)
 	local t = typeof(v)
 	if t == "Color3" then return { __c = { v.R, v.G, v.B } } end
@@ -2144,6 +2397,125 @@ end
 function lib:assetdir()
 	return subfolder(self:gamedir(), "assets")
 end
+function lib:startupsettings()
+	if self._startupsettings then return self._startupsettings end
+	local settings = { config = self.autocfg, script = false }
+	self._startuppath = subfolder(self:gamedir(), "settings") .. "/startup.json"
+	local rf, isf = fsok("readfile"), fsok("isfile")
+	if rf and isf and isf(self._startuppath) then
+		local ok, data = pcall(function() return HttpService:JSONDecode(rf(self._startuppath)) end)
+		if ok and type(data) == "table" then
+			if data.config == false or type(data.config) == "string" then settings.config = data.config end
+			settings.script = data.script == true and type(data.token) == "string"
+			settings.token = type(data.token) == "string" and data.token or nil
+		end
+	end
+	self._startupsettings = settings
+	return settings
+end
+function lib:_savestartup()
+	local wf = fsok("writefile")
+	local settings = self:startupsettings()
+	if not wf then return false end
+	return pcall(wf, self._startuppath, HttpService:JSONEncode(settings))
+end
+function lib:_refreshstartup()
+	for _, fn in ipairs(self._startupcontrols or {}) do safe(fn) end
+end
+function lib:setstartupconfig(name)
+	local settings = self:startupsettings()
+	if name ~= false then
+		local path = self:cfgfile(name)
+		local isf = fsok("isfile")
+		if not path or not isf or not isf(path) then return false end
+		name = path:match("([^/\\]+)%.json$")
+	end
+	local previous = settings.config
+	settings.config = name
+	if not self:_savestartup() then settings.config = previous; return false end
+	self:_refreshstartup()
+	return true
+end
+function lib:_fetchsource(url)
+	if type(url) ~= "string" or url == "" then return nil end
+	local ok, body = pcall(function() return game:HttpGet(url) end)
+	if ok and type(body) == "string" and #body > 0 then return body end
+	local req = request or http_request or (syn and syn.request)
+	if req then
+		local okr, r = pcall(req, { Url = url, Method = "GET" })
+		body = okr and (r.Body or r.body) or nil
+		if type(body) == "string" and #body > 0 then return body end
+	end
+	return nil
+end
+function lib:_queueautostart()
+	local settings = self:startupsettings()
+	if not settings.script or self._queuedtoken == settings.token then return true end
+	local queue = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+	if type(queue) ~= "function" then return false end
+	local sourcepath = self._startuppath:gsub("startup%.json$", "script.lua")
+	local code = string.format([[
+local path, token, source, url = %q, %q, %q, %q
+if not game:IsLoaded() then game.Loaded:Wait() end
+local ok, settings = pcall(function() return game:GetService("HttpService"):JSONDecode(readfile(path)) end)
+if not ok or not settings.script or settings.token ~= token then return end
+local env = getgenv()
+env._yhStartupRan = env._yhStartupRan or {}
+local run = token .. game.JobId
+if env._yhStartupRan[path] == run then return end
+env._yhStartupRan[path] = run
+local code
+if url ~= "" then
+	local okf, body = pcall(function() return game:HttpGet(url) end)
+	if okf and type(body) == "string" and #body > 0 then
+		code = body
+		pcall(writefile, source, body)
+	end
+end
+if not code then
+	local okr, raw = pcall(readfile, source)
+	if okr and type(raw) == "string" and #raw > 0 then code = raw end
+end
+if not code then warn("[yall holy] autostart: no script source") return end
+local fn, err = loadstring(code)
+if fn then fn() else warn("[yall holy] autostart: " .. tostring(err)) end
+]], self._startuppath, settings.token, sourcepath, self.startupurl or "")
+	local ok, result = pcall(queue, code)
+	if ok and result ~= false then self._queuedtoken = settings.token; return true end
+	return false
+end
+function lib:setautostart(enabled, source)
+	local settings = self:startupsettings()
+	if enabled then
+		local wf, isf = fsok("writefile"), fsok("isfile")
+		if not wf then return false, "writefile unavailable" end
+		source = source or self.startupsource or self:_fetchsource(self.startupurl)
+		if not source then
+			local rf = fsok("readfile")
+			if rf and isf and isf("yall_holy.lua") then
+				local okr, raw = pcall(rf, "yall_holy.lua")
+				if okr and type(raw) == "string" and #raw > 0 then source = raw end
+			end
+		end
+		if not source then return false, "no script source: set lib.startupurl or save yall_holy.lua in the workspace" end
+		if type(source) ~= "string" or not loadstring(source) then return false, "invalid startup script" end
+		local ok = pcall(wf, self._startuppath:gsub("startup%.json$", "script.lua"), source)
+		if not ok then return false, "could not save startup script" end
+	end
+	local previous, previousToken = settings.script, settings.token
+	settings.script = enabled and true or false
+	settings.token = HttpService:GenerateGUID(false)
+	self._queuedtoken = nil
+	if not self:_savestartup() then settings.script, settings.token = previous, previousToken; return false, "could not save startup settings" end
+	if enabled and not self:_queueautostart() then
+		settings.script = false
+		self:_savestartup()
+		self:_refreshstartup()
+		return false, "queue_on_teleport unavailable"
+	end
+	self:_refreshstartup()
+	return true
+end
 function lib:migrateconfigs(dst)
 	if self._migrated then return end
 	self._migrated = true
@@ -2192,20 +2564,52 @@ function lib:listconfigs()
 	table.sort(out)
 	return out
 end
+function lib:_cancelrestore(el)
+	local pending = self._pendingrestores[el]
+	self._pendingrestores[el] = nil
+	if pending and pending.notice then pending.notice.dismiss("replaced") end
+end
+function lib:_restoretoggle(el)
+	self:_cancelrestore(el)
+	el:set(false)
+	local pending = {}
+	self._pendingrestores[el] = pending
+	pending.notice = self:notify({
+		title = el.name, icon = "shield", tone = Color3.fromRGB(255, 98, 111), life = 60, required = true,
+		text = el.warning or "Saved as enabled. Players or moderators may notice this feature and report you. It stays off until you confirm.",
+		action = "Click to enable / swipe left to dismiss",
+		callback = function()
+			if self.alive and self._pendingrestores[el] == pending then el:set(true) end
+		end,
+		ondismiss = function(reason)
+			if reason ~= "action" and self._pendingrestores[el] == pending then
+				self._pendingrestores[el] = nil
+				self:markdirty()
+			end
+		end,
+	})
+end
 function lib:getconfig()
 	local data = { _theme = self:_getthemeconfig() }
 	for flag, el in pairs(self.flags) do
 		local ok, v = pcall(function() return el:get() end)
+		if self._pendingrestores[el] then v = true end
 		if ok and v ~= nil then data[flag] = ser(v) end
 	end
 	return data
 end
 function lib:setconfig(data)
-	for flag, v in pairs(data or {}) do
+	if type(data) ~= "table" then return end
+	local dangerous = {}
+	for flag, v in pairs(data) do
 		local el = self.flags[flag]
-		if el and el.set then pcall(function() el:set(des(v)) end) end
+		if el and el.set then
+			if el.dangerous and v == true then dangerous[#dangerous + 1] = el
+			else pcall(function() el:set(des(v)) end) end
+		end
 	end
-	if data then self:_loadthemeconfig(data._theme) end
+	self:_loadthemeconfig(data._theme)
+	for _, el in ipairs(dangerous) do self:_restoretoggle(el) end
 end
 function lib:saveconfig(name)
 	local wf = fsok("writefile")
@@ -2273,7 +2677,11 @@ end
 function lib:deleteconfig(name)
 	local df = fsok("delfile")
 	local path = self:cfgfile(name)
-	if df and path then return pcall(df, path) end
+	if df and path then
+		local ok = pcall(df, path)
+		if ok and self:startupsettings().config == path:match("([^/\\]+)%.json$") then self:setstartupconfig(false) end
+		return ok
+	end
 	return false
 end
 function lib:markdirty()
@@ -2292,9 +2700,11 @@ function lib:_autocfg()
 	task.spawn(function()
 		task.wait(0.4)
 		if not self.alive then return end
-		self:loadconfig(self.autocfg)
+		local settings = self:startupsettings()
+		if settings.config then self:loadconfig(settings.config) end
 		self._ready = true
-		self:saveconfig(self.autocfg)
+		if self.autosave then self:saveconfig(self.autocfg) end
+		if settings.script then self:_queueautostart() end
 	end)
 end
 task.spawn(function()
@@ -2304,6 +2714,10 @@ task.spawn(function()
 	end
 end)
 pcall(function() game:BindToClose(function() lib:flushconfig() end) end)
+conn(LP.OnTeleport, function(state)
+	if state == Enum.TeleportState.Failed then lib._queuedtoken = nil
+	elseif state == Enum.TeleportState.Started then lib:_queueautostart() end
+end)
 local function place(pg, side, card)
 	local target
 	if side == "right" then
@@ -2324,6 +2738,7 @@ local function newcard(pg, cfg)
 		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 5, BorderSizePixel = 0, bind = { BackgroundColor3 = "panel" },
 	}, wrap)
 	corner(card, 7)
+	card:SetAttribute("yhSection", true)
 	mk("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(178, 178, 190)) }, card)
 	shadow(card, 2, 0.45, 12, -1, -1)
 	vlist(card, 0)
@@ -2379,17 +2794,49 @@ local function sidekey(s)
 end
 local function filterpage(pg, q)
 	q = string.lower(q or "")
-	local shown = {}
+	local shown, frames = {}, {}
+	local matches = 0
 	for _, e in ipairs(pg.elems) do
 		local title = e.card and pg.titles[e.card] or ""
-		local show = q == "" or e.name:find(q, 1, true) ~= nil or title:find(q, 1, true) ~= nil
-		e.frame.Visible = show
-		if show and e.card then shown[e.card] = true end
+		local show = q == "" or (e.terms or e.name):find(q, 1, true) ~= nil or title:find(q, 1, true) ~= nil
+		if show then
+			matches = matches + 1
+			frames[e.display or e.frame] = true
+			if e.card then shown[e.card] = true end
+		end
 	end
-	for _, c in ipairs(pg.cards) do c.Visible = (q == "") or shown[c] == true end
+	local seen = {}
+	for _, e in ipairs(pg.elems) do
+		local frame = e.display or e.frame
+		if not seen[frame] then frame.Visible = q == "" or frames[frame] == true; seen[frame] = true end
+	end
+	for _, card in ipairs(pg.cards) do card.Visible = q == "" or shown[card] == true end
+	return matches
+end
+function lib:_applysearch(win, query, source)
+	local q = string.lower(query or "")
+	win._searchquery = q
+	local first, current
+	win._searchsync = true
+	for _, pg in ipairs(win._pages) do
+		if pg._searchbox and pg._searchbox.Text ~= q then pg._searchbox.Text = q end
+		local matches = filterpage(pg, q)
+		if matches > 0 then
+			first = first or pg
+			if pg.tab == win.cur then current = pg end
+		end
+	end
+	win._searchsync = false
+	local target = current or first
+	if q ~= "" and target and win.cur ~= target.tab then
+		win:select(target.tab)
+		if target._opensearch then task.defer(target._opensearch, false) end
+	end
+	return target
 end
 local function buildpage(tab, win)
-	local pg = { elems = {}, cards = {}, titles = {}, seq = 0, colseq = 0 }
+	local pg = { elems = {}, cards = {}, titles = {}, seq = 0, colseq = 0, tab = tab, win = win }
+	win._pages[#win._pages + 1] = pg
 	local f = mk("Frame", { Visible = false, ZIndex = 4, BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1) }, win.pages)
 	pg.frame = f
 	pg.cg = mk("CanvasGroup", { ZIndex = 5, BackgroundTransparency = 1, Position = UDim2.fromOffset(0, 34), Size = UDim2.new(1, 0, 1, -34), BorderSizePixel = 0 }, f)
@@ -2447,19 +2894,19 @@ local function buildpage(tab, win)
 		end
 	end
 	local sopen, sclosedat = false, -1e9
-	local function opensearch()
+	local function opensearch(capture)
 		if sopen then return end
 		sopen = true
 		tb.Visible = true
 		sb.Image = icon("x")
 		tw(palette, { GroupTransparency = 1 }, FAST)
-		task.delay(0.14, function() if sopen and tb:IsFocused() then palette.Visible = false end end)
+		task.delay(0.14, function() if sopen and (capture == false or tb:IsFocused()) then palette.Visible = false end end)
 		tw(tb, { Size = UDim2.new(0.66, -44, 0, 27), TextTransparency = 0 })
 		tw(tst, { Transparency = 0.35 })
 		tw(uline, { BackgroundTransparency = 0.35 })
 		tw(sb, { BackgroundTransparency = 0.45, ImageColor3 = THEME.text, ImageTransparency = 0 })
 		tw(title, { TextTransparency = 1 })
-		task.delay(0.12, function() if sopen then tb:CaptureFocus() end end)
+		if capture ~= false then task.delay(0.12, function() if sopen then tb:CaptureFocus() end end) end
 	end
 	local function closesearch()
 		if not sopen then return end
@@ -2489,7 +2936,10 @@ local function buildpage(tab, win)
 	sb.MouseLeave:Connect(function()
 		if not sopen and not tb:IsFocused() then tw(sb, { BackgroundTransparency = 1, ImageColor3 = THEME.dim, ImageTransparency = 0.2 }) end
 	end)
-	tb:GetPropertyChangedSignal("Text"):Connect(function() filterpage(pg, tb.Text) end)
+	pg._searchbox, pg._opensearch, pg._closesearch = tb, opensearch, closesearch
+	tb:GetPropertyChangedSignal("Text"):Connect(function()
+		if not win._searchsync then lib:_applysearch(win, tb.Text, pg) end
+	end)
 	tb.FocusLost:Connect(closesearch)
 	return pg
 end
@@ -2823,7 +3273,7 @@ end
 function Tab:configs(cfg)
 	cfg = cfg or {}
 	local pg = self._pg
-	local card, content = newcard(pg, { title = cfg.name or "Configs", icon = "save", headh = 28, nochev = true, raw = true, rawh = 236, side = sidekey(cfg.side) })
+	local card, content = newcard(pg, { title = cfg.name or "Configs", icon = "save", headh = 28, nochev = true, raw = true, rawh = 274, side = sidekey(cfg.side) })
 	pg.cards[#pg.cards + 1] = card
 	pg.titles[card] = string.lower(tostring(cfg.name or "configs"))
 	local chosen = ""
@@ -2845,14 +3295,52 @@ function Tab:configs(cfg)
 	local tst = stroke(tb, "line", 0.6)
 	tb.Focused:Connect(function() tw(tst, { Transparency = 0.25 }) end)
 	tb.FocusLost:Connect(function() tw(tst, { Transparency = 0.6 }); chosen = tb.Text end)
-	local status = lbl(content, { Position = UDim2.fromOffset(11, 212), Size = UDim2.new(1, -22, 0, 14), TextSize = 11, TextColor3 = THEME.dim, ZIndex = 6, Text = "" })
-	local stok = 0
+	local status = lbl(content, { Position = UDim2.fromOffset(11, 250), Size = UDim2.new(1, -22, 0, 14), TextSize = 11, TextColor3 = THEME.dim, ZIndex = 6, Text = "" })
+	local stok, saying = 0, false
+	local function autobase()
+		local n = lib:startupsettings().config
+		if n then return "auto-loads on join: " .. n end
+		return "tap to auto-load a config on join"
+	end
 	local function say(t)
 		stok = stok + 1
 		local my = stok
+		saying = true
 		status.Text = t
-		task.delay(4, function() if my == stok then status.Text = "" end end)
+		task.delay(4, function() if my == stok then saying = false; status.Text = autobase() end end)
 	end
+	local autoload = mk("TextButton", {
+		Position = UDim2.fromOffset(10, 216), Size = UDim2.new(1, -20, 0, 28), Text = "", ZIndex = 6,
+		BorderSizePixel = 0, AutoButtonColor = false, bind = { BackgroundColor3 = "head" },
+	}, content)
+	corner(autoload, 6)
+	local ast = stroke(autoload, "line", 0.6)
+	local aic = img(autoload, { Image = icon("power"), Position = UDim2.fromOffset(10, 7), Size = UDim2.fromOffset(14, 14), ZIndex = 7 })
+	local atx = lbl(autoload, { Position = UDim2.fromOffset(32, 0), Size = UDim2.new(1, -40, 1, 0), TextSize = 11, ZIndex = 7 })
+	local function paintautoload()
+		local name = lib:startupsettings().config
+		atx.Text = "Auto-load: " .. (name or "Off")
+		aic.ImageColor3 = name and THEME.accent or THEME.dim
+		ast.Color = name and THEME.accent or THEME.line
+		if not saying then status.Text = autobase() end
+	end
+	lib._startupcontrols = lib._startupcontrols or {}
+	lib._startupcontrols[#lib._startupcontrols + 1] = paintautoload
+	reapply[#reapply + 1] = paintautoload
+	autoload.MouseButton1Click:Connect(function()
+		local name = tb.Text ~= "" and tb.Text or chosen
+		local current = lib:startupsettings().config
+		if name == "" then
+			if current then name = current else say("pick a saved config first"); return end
+		end
+		local target = name
+		if current == name then target = false end
+		if lib:setstartupconfig(target) then
+			say(lib:startupsettings().config and ("startup: " .. name) or "auto-load disabled")
+		else say("save this config first") end
+		lib:chime("click")
+	end)
+	paintautoload()
 	local paintrows = function() end
 	local function refresh()
 		local names = lib:listconfigs()
@@ -3279,10 +3767,12 @@ local function localbytes(src)
 	return nil
 end
 local function write_embedded()
-	local wf = fsok("writefile")
+	local wf, isf = fsok("writefile"), fsok("isfile")
 	if not wf then return nil end
-	local p = lib:assetdir() .. "/yall_holy_logo.png"
-	pcall(wf, p, b64decode(EMBEDDED_LOGO))
+	local p = subfolder(lib:rootdir(), "assets") .. "/yall_holy_logo.png"
+	if not isf or not isf(p) then
+		if not pcall(wf, p, b64decode(EMBEDDED_LOGO)) then return nil end
+	end
 	return p
 end
 local function resolveasset(src, wantnobg)
@@ -3364,24 +3854,45 @@ local function resolveasset(src, wantnobg)
 	if ok then return a end
 	return nil
 end
+local function decaltex(id)
+	if not getobjects then return nil end
+	local ok, res = pcall(getobjects, "rbxassetid://" .. id)
+	if not ok or type(res) ~= "table" then return nil end
+	for _, d in ipairs(res) do
+		local dec = d:IsA("Decal") and d or d:FindFirstChildWhichIsA("Decal", true)
+		if dec and dec.Texture ~= "" then return dec.Texture end
+	end
+	return nil
+end
 function lib:_loadlogo(win, src)
 	if src == nil or src == "" then
 		src = "yall_holy_logo2.png"
 	end
 	if type(src) == "number" then
-		win.logo.Image = "rbxassetid://" .. src; win.logotext.Visible = false
+		win.logo.Image = decaltex(src) or ("rbxassetid://" .. src); win.logotext.Visible = false
+		win.logo.ScaleType = Enum.ScaleType.Fit
 		return
 	end
 	src = tostring(src)
 	if src:find("^rbx") then
-		win.logo.Image = src; win.logotext.Visible = false
+		local id = src:match("(%d+)")
+		win.logo.Image = (id and decaltex(id)) or src; win.logotext.Visible = false
+		win.logo.ScaleType = Enum.ScaleType.Fit
 		return
 	end
 	task.spawn(function()
 		local asset = resolveasset(src, true)
 		if asset and lib.alive and win.logo.Parent then
 			win.logo.Image = asset
+			win.logo.ScaleType = Enum.ScaleType.Fit
 			win.logotext.Visible = false
+		elseif lib.alive and win.logo.Parent then
+			local fb = decaltex(75599892269199)
+			if fb then
+				win.logo.Image = fb
+				win.logo.ScaleType = Enum.ScaleType.Fit
+				win.logotext.Visible = false
+			end
 		else
 			warn("[ui] logo not loaded: " .. src .. " (use a direct image link, rbxassetid or put the file into workspace)")
 		end
@@ -3450,17 +3961,23 @@ function lib:window(cfg)
 	local size = cfg.size
 	if typeof(size) == "Vector2" then size = UDim2.fromOffset(size.X, size.Y) end
 	local vs = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or gui.AbsoluteSize
-	size = size or UDim2.fromOffset(
+	local phone = self.mobile and true or false
+	size = size or (phone and UDim2.fromOffset(
+		math.clamp(math.floor(vs.X * 0.54), 480, 680),
+		math.clamp(math.floor(vs.Y * 0.88), 380, 560)
+	) or UDim2.fromOffset(
 		math.min(680, math.max(528, vs.X - 48)),
 		math.min(560, math.max(420, vs.Y - 48))
-	)
-	local side = tonumber(cfg.side) or math.max(153, math.min(196, math.floor(size.X.Offset * 0.27)))
+	))
+	local side = tonumber(cfg.side) or (phone and math.clamp(math.floor(size.X.Offset * 0.30), 140, 190)
+		or math.max(153, math.min(196, math.floor(size.X.Offset * 0.27))))
+	local pf = 1
 	local radius = tonumber(cfg.radius) or 9
 	local logo = cfg.logo or self.logo or ""
 	if cfg.title then self:retitle(cfg.title) end
-	local win = { open = true, tabn = 0, size = size, side = side, tabsList = {} }
-	local shell = mk("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Name = randname(), Active = true, Position = UDim2.fromScale(0.5, 0.5), BackgroundTransparency = 1, BorderSizePixel = 0, Size = size, Visible = false }, gui)
-	local uiscale = mk("UIScale", { Scale = 0.96 * self.scale }, shell)
+	local win = { open = true, tabn = 0, size = size, side = side, tabsList = {}, _pages = {}, _searchquery = "", _searchsync = false }
+	local shell = mk("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Name = randname(), Active = true, ZIndex = 1400, Position = UDim2.fromScale(0.5, 0.5), BackgroundTransparency = 1, BorderSizePixel = 0, Size = size, Visible = false }, gui)
+	local uiscale = mk("UIScale", { Scale = 0.96 * self.scale * pf }, shell)
 	win.shell = shell
 	local sh = mk("Frame", { BackgroundTransparency = 1, ZIndex = 1, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1) }, shell)
 	corner(sh, radius)
@@ -3485,8 +4002,9 @@ function lib:window(cfg)
 	win.root = root
 	local frame = mk("Frame", { BackgroundTransparency = 1, ZIndex = 20, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1) }, root)
 	corner(frame, radius); stroke(frame, "line", 0.6)
-	local base = mk("Frame", { Active = true, ZIndex = 0, BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1) }, root)
-	smoothdrag(base, shell)
+	local base = mk("Frame", { ZIndex = 0, BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1) }, root)
+	-- window drag from non-interactive areas is handled by the global catch-all below
+	-- (it suppresses page/tab scrolling while dragging); drag from sections is rejected via yhSection
 	local body = mk("Frame", { Position = UDim2.fromOffset(side, 0), ClipsDescendants = true, ZIndex = 1, BorderSizePixel = 0, Size = UDim2.new(1, -side, 1, 0), bind = { BackgroundColor3 = "bg" } }, root)
 	corner(body, radius)
 	mk("Frame", { ZIndex = 1, BorderSizePixel = 0, Size = UDim2.new(0, radius, 1, 0), bind = { BackgroundColor3 = "bg" } }, body)
@@ -3500,14 +4018,64 @@ function lib:window(cfg)
 	local sb = mk("Frame", { ClipsDescendants = true, ZIndex = 5, BorderSizePixel = 0, Size = UDim2.new(0, side, 1, 0), bind = { BackgroundColor3 = "side" } }, root)
 	corner(sb, radius)
 	mk("Frame", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), ZIndex = 5, BorderSizePixel = 0, Size = UDim2.new(0, radius, 1, 0), bind = { BackgroundColor3 = "side" } }, sb)
-	smoothdrag(sb, shell)
+	smoothdrag(sb, shell, nil, function(pos)
+		-- tabs must never move the window, not even through the sidebar catch-all
+		return not (win.tabs and inside(win.tabs, pos))
+	end)
+	local function isInteractiveAt(x, y)
+		local objs = gui:GetGuiObjectsAtPosition(x, y)
+		for _, o in ipairs(objs) do
+			if o == frame or o == sh then continue end
+			if ispop(o) then return true end
+			if o:IsA("GuiButton") or o:IsA("TextBox") then return true end
+			local p = o
+			while p and p ~= shell do
+				if p:GetAttribute("yhSection") then return true end
+				p = p.Parent
+			end
+		end
+		return false
+	end
+	conn(UserInputService.InputBegan, function(input, gp)
+		local ty = input.UserInputType
+		if ty ~= Enum.UserInputType.MouseButton1 and ty ~= Enum.UserInputType.Touch then return end
+		if #stack > 0 or modal then return end
+		if not shell.Visible or not win.open then return end
+		local pos = mpos(input)
+		if not inside(shell, pos) then return end
+		if isInteractiveAt(pos.X, pos.Y) then return end
+		local scrolls = {}
+		for _, pg in ipairs(win._pages) do
+			for _, s in ipairs({ pg.left, pg.right }) do
+				if s and s.ScrollingEnabled then scrolls[#scrolls + 1] = s; s.ScrollingEnabled = false end
+			end
+		end
+		if win.tabs and win.tabs.ScrollingEnabled then scrolls[#scrolls + 1] = win.tabs; win.tabs.ScrollingEnabled = false end
+		local start = pos
+		local p = shell.Position
+		local ox, oy, sx, sy = p.X.Offset, p.Y.Offset, p.X.Scale, p.Y.Scale
+		local moved = false
+		startdrag(function(curPos)
+			local dx, dy = curPos.X - start.X, curPos.Y - start.Y
+			if not moved and (math.abs(dx) + math.abs(dy)) > 3 then moved = true end
+			if not moved then return end
+			local m = smoothers[shell]
+			if not m then m = { cx = ox, cy = oy } smoothers[shell] = m end
+			m.sx, m.sy = sx, sy
+			m.gx, m.gy = ox + dx, oy + dy
+			m.active = true
+		end, function()
+			for _, s in ipairs(scrolls) do s.ScrollingEnabled = true end
+		end)
+	end)
 	local sep = mk("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, side, 0.5, 0), ZIndex = 8, BackgroundTransparency = 1, Size = UDim2.new(0, 16, 1, 0) }, root)
 	local sepg = mk("Frame", { BackgroundTransparency = 0.9, ZIndex = 8, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1), bind = { BackgroundColor3 = "glow" } }, sep)
 	grad(sepg, 0, { { 0, 1 }, { 0.5, 0.35 }, { 1, 1 } })
 	local sepl = mk("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = 9, BorderSizePixel = 0, Size = UDim2.new(0, 1, 1, 0), bind = { BackgroundColor3 = "line" } }, sep)
 	grad(sepl, 90, { { 0, 1 }, { 0.12, 0.25 }, { 0.88, 0.25 }, { 1, 1 } })
-	win.logo = img(sb, { AnchorPoint = Vector2.new(0.5, 0), Image = "", Position = UDim2.new(0.5, 0, 0, 14), ZIndex = 7, Size = UDim2.fromOffset(117, 117), bind = { ImageColor3 = "accent" } })
-	win.logotext = lbl(sb, { Text = tostring(cfg.title or self.title), Position = UDim2.fromOffset(8, 14), Size = UDim2.new(1, -16, 0, 117), TextSize = 20, TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 7, TextColor3 = THEME.text })
+	local logoh = 117
+	win.logo = img(sb, { AnchorPoint = Vector2.new(0.5, 0), Image = "", Position = UDim2.new(0.5, 0, 0, 14), ZIndex = 7, Size = UDim2.fromOffset(logoh, logoh), ScaleType = Enum.ScaleType.Fit, bind = { ImageColor3 = "accent" } })
+	win.logotext = lbl(sb, { Text = tostring(cfg.title or self.title), Position = UDim2.fromOffset(8, 14), Size = UDim2.new(1, -16, 0, logoh), TextSize = 20, TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 7, TextColor3 = THEME.text })
 	self:_loadlogo(win, logo)
 	if cfg.mascot then
 		local m = mk("ImageLabel", {
@@ -3531,8 +4099,33 @@ function lib:window(cfg)
 	win.tabs = mk("ScrollingFrame", {
 		Active = true, ScrollBarThickness = 0, BackgroundTransparency = 1, Position = UDim2.fromOffset(6, 154), CanvasSize = UDim2.new(),
 		AutomaticCanvasSize = Enum.AutomaticSize.Y, ZIndex = 7, BorderSizePixel = 0, Size = UDim2.new(1, -12, 1, -222),
+		ScrollingEnabled = not lib.mobile,
 	}, sb)
 	vlist(win.tabs, 3)
+	do
+	local strack = mk("Frame", { AnchorPoint = Vector2.new(1, 0), BackgroundTransparency = 0.75, Position = UDim2.new(1, -2, 0, 154), Size = UDim2.new(0, 2, 1, -222), ZIndex = 8, BorderSizePixel = 0, bind = { BackgroundColor3 = "line" } }, sb)
+	corner(strack, "full")
+	local sthumb = mk("Frame", { AnchorPoint = Vector2.new(0.5, 0), BackgroundTransparency = 0.15, Position = UDim2.new(0.5, 0, 0, 0), Size = UDim2.new(1, 0, 0, 24), ZIndex = 9, BorderSizePixel = 0, bind = { BackgroundColor3 = "accent" } }, strack)
+	corner(sthumb, "full")
+	local function painttscroll()
+		if not win.tabs.ScrollingEnabled then strack.Visible = false; return end
+		local ch = win.tabs.AbsoluteCanvasSize.Y
+		local wh = win.tabs.AbsoluteWindowSize.Y
+		local th = strack.AbsoluteSize.Y
+		if ch <= wh + 1 or th < 8 then strack.Visible = false; return end
+		strack.Visible = true
+		local hh = math.max(18, th * wh / ch)
+		local maxy = ch - wh
+		local t = maxy > 0 and math.clamp(win.tabs.CanvasPosition.Y / maxy, 0, 1) or 0
+		sthumb.Size = UDim2.new(1, 0, 0, hh)
+		sthumb.Position = UDim2.new(0.5, 0, 0, t * (th - hh))
+	end
+	conn(win.tabs:GetPropertyChangedSignal("CanvasPosition"), painttscroll)
+	conn(win.tabs:GetPropertyChangedSignal("AbsoluteCanvasSize"), painttscroll)
+	conn(win.tabs:GetPropertyChangedSignal("AbsoluteWindowSize"), painttscroll)
+	conn(strack:GetPropertyChangedSignal("AbsoluteSize"), painttscroll)
+	task.defer(painttscroll)
+	end
 	hair(0, 1, UDim2.new(0.5, 0, 1, -60))
 	local pc = mk("Frame", { AnchorPoint = Vector2.new(0.5, 1), BackgroundTransparency = 0.25, Position = UDim2.new(0.5, 0, 1, -8), ZIndex = 7, BorderSizePixel = 0, Size = UDim2.new(1, -12, 0, 44), bind = { BackgroundColor3 = "head" } }, sb)
 	corner(pc, 8); stroke(pc, "line", 0.72)
@@ -3601,11 +4194,11 @@ function lib:window(cfg)
 		if v then
 			lib.focus = self
 			shell.Visible = true
-			tw(root, { GroupTransparency = 0 }); tw(uiscale, { Scale = lib.scale })
+			tw(root, { GroupTransparency = 0 }); tw(uiscale, { Scale = lib.scale * pf })
 			shadowshow(true, FAST)
 		else
 			closemodal()
-			tw(root, { GroupTransparency = 1 }); tw(uiscale, { Scale = 0.96 * lib.scale })
+			tw(root, { GroupTransparency = 1 }); tw(uiscale, { Scale = 0.96 * lib.scale * pf })
 			shadowshow(false)
 			task.delay(0.26, function() if not self.open then shell.Visible = false end end)
 		end
@@ -3615,7 +4208,7 @@ function lib:window(cfg)
 		self.open = true
 		shell.Visible = true
 		tw(root, { GroupTransparency = 0 }, TweenInfo.new(0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.Out))
-		tw(uiscale, { Scale = lib.scale }, TweenInfo.new(0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.Out))
+		tw(uiscale, { Scale = lib.scale * pf }, TweenInfo.new(0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.Out))
 		shadowshow(true, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out))
 	end
 	function win:setbind(k)
@@ -3637,22 +4230,400 @@ function lib:window(cfg)
 	end)
 	return win
 end
-local opener = mk("ImageButton", {
-	AutoButtonColor = false, Selectable = false, ImageColor3 = Color3.new(1, 1, 1), ScaleType = Enum.ScaleType.Fit, Active = true,
-	BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0.5), Image = "", Position = UDim2.new(1, -10, 0.5, 0), Visible = false,
-	ZIndex = 950, BorderSizePixel = 0, Size = UDim2.fromOffset(54, 54),
-}, gui)
-fastdrag(opener, opener, function() lib:togglemenus() end)
-function lib:openericon(id) opener.Image = tostring(id) end
-function lib:setopener(b) self.opener = b and true or false; opener.Visible = self.opener end
-if lib.mobile then lib:setopener(true) end
+function lib:openericon(id) self.openericon = tostring(id) end
+function lib:setopener(b) self.opener = b and true or false end
+do
+	-- plain Frame, not CanvasGroup: a group rasterizes its text and icons into a blurry texture
+	local mroot = mk("Frame", {
+		Name = "yhMobile", BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 800,
+		Position = UDim2.fromScale(0, 0), Size = UDim2.fromScale(1, 1), Visible = false,
+	}, gui)
+	local mfade = mk("NumberValue", { Value = 0 }, mroot)
+	local mlist, mgestures, mseq, mpad = {}, {}, 0, 0
+	local msize = 38
+	local function mview()
+		local cam = workspace.CurrentCamera
+		return (cam and cam.ViewportSize) or gui.AbsoluteSize
+	end
+	local function mfit(el)
+		local size = msize
+		local ic = size < 48 and 16 or (size < 60 and 20 or (size < 76 and 24 or 28))
+		local fontSize = size < 48 and 10 or (size < 60 and 12 or (size < 76 and 13 or 14))
+		local capHeight = fontSize + 4
+		local top = math.floor((size - ic - capHeight - 4) / 2)
+		el.btn.Size = UDim2.fromOffset(size, size)
+		-- scale-based child layout: the press squish then shrinks icon+caption with the card instead of sliding them
+		el.pic.AnchorPoint = Vector2.new(0.5, 0)
+		el.pic.Position = UDim2.fromScale(0.5, top / size)
+		el.pic.Size = UDim2.fromScale(ic / size, ic / size)
+		el.cap.Position = UDim2.fromScale(4 / size, (top + ic + 4) / size)
+		el.cap.Size = UDim2.fromScale((size - 8) / size, capHeight / size)
+		el.cap.TextSize = fontSize
+		local r = math.min(22, math.round(size * 0.30))
+		local round = el.card:FindFirstChildOfClass("UICorner")
+		if round then round.CornerRadius = UDim.new(0, r) end
+		if el.sheen then
+			local sr = el.sheen:FindFirstChildOfClass("UICorner")
+			if sr then sr.CornerRadius = UDim.new(0, r) end
+		end
+	end
+	local function mplace(el)
+		local vs = mview()
+		local half = msize / 2
+		el.x = math.clamp(el.x, half + 6, math.max(half + 6, vs.X - half - 6))
+		el.y = math.clamp(el.y, half + 6, math.max(half + 6, vs.Y - half - 6))
+		el.btn.Position = UDim2.fromOffset(el.x, el.y)
+	end
+	local function mgrid()
+		local vs = mview()
+		local half = msize / 2
+		local step = msize + 10
+		local rows = math.max(1, math.floor((vs.Y - 120 - half - 6) / step) + 1)
+		local cols = math.max(2, math.floor((vs.X - 44 - half - 6) / step) + 1)
+		return vs, step, rows, cols
+	end
+	local function mslot(vs, step, rows, cols, s)
+		local row = s % rows
+		local col = math.floor(s / rows) % cols
+		return vs.X - 44 - col * step, vs.Y - 120 - row * step
+	end
+	local function flagon(name, dflt)
+		local f = lib.flags[name]
+		if f and f.get then
+			local ok, v = pcall(f.get, f)
+			if ok then return v and true or false end
+		end
+		return dflt
+	end
+	local function mguard()
+		if not flagon("mob_guard", true) then return end
+		local need = msize + 8
+		for _ = 1, 24 do
+			local moved = false
+			for i = 1, #mlist do
+				local a = mlist[i]
+				if a.btn.Visible then
+					for j = i + 1, #mlist do
+						local b = mlist[j]
+						if b.btn.Visible then
+							local dx, dy = b.x - a.x, b.y - a.y
+							if math.abs(dx) < need and math.abs(dy) < need then
+								local px, py = need - math.abs(dx), need - math.abs(dy)
+								local sa = a.pointer and 0 or (b.pointer and 1 or 0.5)
+								local sb = b.pointer and 0 or (a.pointer and 1 or 0.5)
+								if px < py then
+									local s = dx >= 0 and 1 or -1
+									a.x = a.x - s * px * sa; b.x = b.x + s * px * sb
+								else
+									local s = dy >= 0 and 1 or -1
+									a.y = a.y - s * py * sa; b.y = b.y + s * py * sb
+								end
+								mplace(a); mplace(b)
+								moved = true
+							end
+						end
+					end
+				end
+			end
+			if not moved then break end
+		end
+		for _, el in ipairs(mlist) do mplace(el) end
+	end
+	lib._mguard = mguard
+	lib._mrepaint = function()
+		for _, el in ipairs(mlist) do pcall(el.paint) end
+	end
+	local function mpaint(el, on)
+		local a = mfade.Value
+		local g = flagon("mob_glass", false)
+		tw(el.pic, { ImageColor3 = on and THEME.accent or THEME.text }, FAST)
+		tw(el.cap, { TextColor3 = on and THEME.accent or THEME.text }, FAST)
+		local ct = g and (on and 0.45 or 0.62) or (on and 0.35 or 0.2)
+		tw(el.card, { BackgroundTransparency = 1 - (1 - ct) * a }, FAST)
+		el.pic.ImageTransparency = 1 - a
+		el.cap.TextTransparency = 1 - a
+		if el.hl then el.hl.BackgroundTransparency = 1 - 0.3 * a end
+		if el.sheen then
+			el.sheen.Visible = g
+			if g then el.sheen.BackgroundTransparency = el.pointer and 0 or (1 - 0.75 * a) end
+		end
+		if el.shadow then
+			el.shadow.Enabled = g
+			if g then el.shadow.Transparency = 1 - 0.45 * a end
+		end
+		if el.edge then
+			if g then
+				el.edge.Color = on and THEME.accent or Color3.new(1, 1, 1)
+				el.edge.Transparency = 1 - (1 - (on and 0.25 or 0.62)) * a
+				el.edge.Thickness = on and 1.6 or 1.1
+			else
+				el.edge.Color = on and THEME.accent or THEME.line
+				el.edge.Transparency = 1 - (1 - (on and 0.3 or 0.45)) * a
+				el.edge.Thickness = on and 1.5 or 1
+			end
+		end
+	end
+	local function mcancel(el)
+		if el.pointer then mgestures[el.pointer] = nil; el.pointer = nil end
+		if el.card and el.card.Parent then
+			el.card.BackgroundColor3 = THEME.panel:Lerp(THEME.text, 0.10)
+			tw(el.card, { Size = UDim2.fromScale(1, 1) }, FAST)
+		end
+		if el.sheen and flagon("mob_glass", false) then tw(el.sheen, { BackgroundTransparency = 0.25 }, FAST) end
+	end
+	local function mposof(input)
+		local pos = input.UserInputType == Enum.UserInputType.Touch and input.Position or UserInputService:GetMouseLocation()
+		return Vector2.new(pos.X, pos.Y)
+	end
+	local function mmove(g, input)
+		local pos = mposof(input)
+		local delta = pos - g.start
+		if delta.Magnitude >= g.threshold then g.dragged = true end
+		if g.dragged then
+			g.el.x, g.el.y = g.origin.X + delta.X, g.origin.Y + delta.Y
+			mplace(g.el)
+		end
+	end
+	conn(UserInputService.InputChanged, function(input)
+		local g = mgestures[input]
+		if g then
+			if input.UserInputState == Enum.UserInputState.Cancel then mcancel(g.el) else mmove(g, input) end
+		elseif input.UserInputType == Enum.UserInputType.MouseMovement then
+			for pointer, mouse in pairs(mgestures) do
+				if pointer.UserInputType == Enum.UserInputType.MouseButton1 then mmove(mouse, input) end
+			end
+		end
+	end)
+	conn(UserInputService.InputEnded, function(input)
+		local g = mgestures[input]
+		if not g then return end
+		local el = g.el
+		mmove(g, input)
+		mcancel(el)
+		if input.UserInputState ~= Enum.UserInputState.Cancel and not g.dragged
+			and lib.alive and mroot.Visible and el.btn.Visible then
+			task.spawn(el.run)
+		end
+	end)
+	local function mcancelall()
+		for _, el in ipairs(mlist) do mcancel(el) end
+	end
+	conn(UserInputService.WindowFocusReleased, mcancelall)
+	local mprev = mview()
+	conn(mroot:GetPropertyChangedSignal("AbsoluteSize"), function()
+		mcancelall()
+		local vs = mview()
+		if vs.X <= 0 or vs.Y <= 0 then return end
+		for _, el in ipairs(mlist) do
+			if mprev.X > 0 and mprev.Y > 0 then
+				el.x, el.y = el.x * vs.X / mprev.X, el.y * vs.Y / mprev.Y
+			end
+			mplace(el)
+		end
+		mprev = vs
+	end)
+	function lib:mobtn(cfg)
+		mseq = mseq + 1
+		local el = { flag = cfg.flag, fn = cfg.fn, get = cfg.get, on = false, name = tostring(cfg.tip or mseq) }
+		local vs, step, rows, cols = mgrid()
+		local x, y
+		for s = 0, rows * cols - 1 do
+			local sx, sy = mslot(vs, step, rows, cols, s)
+			local free = true
+			for _, o in ipairs(mlist) do
+				if o.btn.Visible and math.abs(o.x - sx) < msize + 8 and math.abs(o.y - sy) < msize + 8 then free = false; break end
+			end
+			if free then x, y = sx, sy; break end
+		end
+		if not x then x, y = mslot(vs, step, rows, cols, #mlist % (rows * cols)) end
+		el.x, el.y = x, y
+		local b = mk("TextButton", {
+			Name = "yhMobile_" .. el.name, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(el.x, el.y),
+			Size = UDim2.fromOffset(msize, msize), BackgroundTransparency = 1, Active = true,
+			AutoButtonColor = false, BorderSizePixel = 0, Text = "", Selectable = false,
+		}, mroot)
+		el.btn = b
+		local card = mk("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 0.2, ClipsDescendants = true, ZIndex = 2, BorderSizePixel = 0,
+			bind = { BackgroundColor3 = "panel" },
+		}, b)
+		corner(card, 18)
+		el.edge = stroke(card, "line", 0.45)
+		el.card = card
+		local hl = mk("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 1), Size = UDim2.new(1, -14, 0, 1),
+			BackgroundTransparency = 0.7, ZIndex = 3, BorderSizePixel = 0, bind = { BackgroundColor3 = "glow" },
+		}, card)
+		grad(hl, 0, { { 0, 1 }, { 0.5, 0.1 }, { 1, 1 } })
+		el.hl = hl
+		local sheen = mk("Frame", {
+			Name = "glass", BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0.25,
+			BorderSizePixel = 0, ZIndex = 3, Position = UDim2.fromScale(0, 0), Size = UDim2.fromScale(1, 1),
+		}, card)
+		grad(sheen, 115, { { 0, 0.86 }, { 0.35, 0.97 }, { 0.65, 0.97 }, { 1, 0.90 } })
+		corner(sheen, 18)
+		el.sheen = sheen
+		el.shadow = mk("UIShadow", {
+			BlurRadius = UDim.new(0, 10), Offset = UDim2.fromOffset(0, 3), Transparency = 0.55,
+		}, card)
+		el.pic = img(card, {
+			AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 0.58, 0), Size = UDim2.fromOffset(21, 21),
+			Image = icon(cfg.icon or "sparkles"), ZIndex = 4, ImageColor3 = THEME.text,
+		})
+		el.cap = lbl(card, {
+			Position = UDim2.new(0, 0, 0.58, 2), Size = UDim2.new(1, 0, 0.42, -2), Text = tostring(cfg.tip or ""),
+			Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Center,
+			TextColor3 = THEME.text, ZIndex = 4,
+		})
+		mfit(el)
+		function el.state()
+			if el.flag then
+				local f = lib.flags[el.flag]
+				if not f or not f.get then return false end
+				local ok, v = pcall(f.get, f)
+				return ok and v and true or false
+			end
+			if el.get then
+				local ok, v = pcall(el.get)
+				return ok and v and true or false
+			end
+			return false
+		end
+		function el.paint()
+			el.on = el.state()
+			mpaint(el, el.on)
+			if el.card and el.card.Parent then
+				el.card.BackgroundColor3 = THEME.panel:Lerp(THEME.text, el.pointer and 0.16 or 0.10)
+			end
+		end
+		function el.run()
+			lib:chime("click")
+			if el.flag then
+				local f = lib.flags[el.flag]
+				if f and f.set then pcall(f.set, f, not el.state()) end
+			elseif el.fn then
+				pcall(el.fn)
+			end
+			el.paint()
+		end
+		function el.show(v)
+			b.Visible = v and true or false
+			if not b.Visible then mcancel(el) end
+		end
+		b.InputBegan:Connect(function(input)
+			local ty = input.UserInputType
+			if el.pointer or mgestures[input] or not mroot.Visible or (ty ~= Enum.UserInputType.Touch and ty ~= Enum.UserInputType.MouseButton1) then return end
+			el.pointer = input
+			mgestures[input] = { el = el, start = mposof(input), origin = Vector2.new(el.x, el.y),
+				threshold = ty == Enum.UserInputType.Touch and 10 or 6, dragged = false }
+			el.card.BackgroundColor3 = THEME.panel:Lerp(THEME.text, 0.16)
+			tw(el.card, { Size = UDim2.fromScale(0.92, 0.92) }, FAST)
+			if el.sheen and flagon("mob_glass", false) then tw(el.sheen, { BackgroundTransparency = 0 }, FAST) end
+		end)
+		mlist[#mlist + 1] = el
+		mplace(el)
+		task.defer(el.paint)
+		return el
+	end
+	function lib:remobtn(el)
+		for i, e in ipairs(mlist) do
+			if e == el then table.remove(mlist, i) break end
+		end
+		mcancel(el)
+		if el and el.btn then pcall(function() el.btn:Destroy() end) end
+	end
+	conn(RunService.Heartbeat, function(dt)
+		if not mroot.Visible then return end
+		mpad = mpad + dt
+		if mpad < 0.25 then return end
+		mpad = 0
+		for _, el in ipairs(mlist) do
+			mplace(el)
+			pcall(el.paint)
+		end
+		mguard()
+	end)
+	function lib:setmobsize(v)
+		mcancelall()
+		v = tonumber(v) or 38
+		msize = math.clamp(math.round(v), 30, 92)
+		for _, el in ipairs(mlist) do
+			mfit(el)
+			mplace(el)
+		end
+		mguard()
+	end
+	function lib:mobplaces()
+		local out = {}
+		for _, el in ipairs(mlist) do
+			out[#out + 1] = { n = el.name, x = math.round(el.x), y = math.round(el.y) }
+		end
+		return out
+	end
+	function lib:setmobplaces(list)
+		mcancelall()
+		local byName = {}
+		for _, el in ipairs(mlist) do byName[el.name] = el end
+		for _, p in ipairs(list or {}) do
+			local el = type(p) == "table" and byName[tostring(p.n)]
+			if el and tonumber(p.x) and tonumber(p.y) then
+				el.x, el.y = tonumber(p.x), tonumber(p.y)
+				mplace(el)
+			end
+		end
+		mguard()
+	end
+	function lib:mobreset()
+		mcancelall()
+		local vs, step, rows, cols = mgrid()
+		local i = 0
+		for _, el in ipairs(mlist) do
+			if el.btn.Visible then
+				i = i + 1
+				el.x, el.y = mslot(vs, step, rows, cols, i - 1)
+				mplace(el)
+			end
+		end
+		mguard()
+	end
+	conn(mfade:GetPropertyChangedSignal("Value"), function()
+		for _, el in ipairs(mlist) do pcall(el.paint) end
+	end)
+	function lib:setmobile(on)
+		self.touch = on and true or false
+		if self.touch then
+			mroot.Visible = true
+			tw(mfade, { Value = 1 }, EASE)
+		else
+			mcancelall()
+			tw(mfade, { Value = 0 }, EASE)
+			task.delay(0.26, function()
+				if not self.touch then mroot.Visible = false end
+			end)
+		end
+	end
+	reapply[#reapply + 1] = function()
+		for _, el in ipairs(mlist) do pcall(el.paint) end
+	end
+	lib._mcleanup = function()
+		mcancelall()
+		for i = #mlist, 1, -1 do mlist[i] = nil end
+	end
+end
 function lib:onunload(fn)
 	if type(fn) == "function" then self.unloadhooks[#self.unloadhooks + 1] = fn end
 end
 function lib:unload()
 	if not self.alive then return end
-	self.alive = false
+	local stopped, err = self:setautostart(false)
+	if not stopped and self:startupsettings().script then
+		self:notify({ title = "Unload", text = err or "Could not disable autostart. Try again.", icon = "x", required = true })
+		return false
+	end
+	for el in pairs(self._pendingrestores) do self:_cancelrestore(el) end
 	self:flushconfig()
+	self.alive = false
 	self._ready = false
 	for _, fn in ipairs(self.unloadhooks) do pcall(fn) end
 	self.unloadhooks = {}
@@ -3662,6 +4633,7 @@ function lib:unload()
 	pcall(function() gui:Destroy() end)
 	for k in pairs(self.flags) do self.flags[k] = nil end
 	for i = #self.keybinds, 1, -1 do self.keybinds[i] = nil end
+	for i = #self._toggles, 1, -1 do self._toggles[i] = nil end
 	for i = #self.wins, 1, -1 do self.wins[i] = nil end
 	for i = #bound, 1, -1 do bound[i] = nil end
 	for i = #reapply, 1, -1 do reapply[i] = nil end
@@ -3669,7 +4641,10 @@ function lib:unload()
 	for i = #self._themeswatches, 1, -1 do self._themeswatches[i] = nil end
 	for i = #self._themeeditors, 1, -1 do self._themeeditors[i] = nil end
 	for k in pairs(hkrows) do hkrows[k] = nil end
+	if self._mcleanup then self._mcleanup(); self._mcleanup = nil end
 	for i = #nlist, 1, -1 do nlist[i] = nil end
+	for i = #nqueue, 1, -1 do nqueue[i] = nil end
+	self._startupcontrols = {}
 	dragfn, dragend, listener = nil, nil, nil
 end
 return lib
@@ -3683,28 +4658,17 @@ local ok2, err = xpcall(function()
 	local t1 = win:tab({ name = "Tab 1", icon = "home", tip = "yall holy" })
 	local c1 = t1:section({ name = "Controls", side = "left" })
 	c1:button({ name = "Button", icon = "zap", callback = function()
-		lib:notify({ title = "Button", text = "clicked", icon = "zap" })
+		lib:notify({ title = "Button", text = "clicked", icon = "zap", life = 10 })
 	end })
 	c1:slider({ name = "Slider", min = 0, max = 100, default = 50, step = 1, suffix = "%", flag = "slider" })
 	c1:slider({ name = "Slider2", min = 0, max = 10, default = 3, step = 1, flag = "slider2" })
 	c1:combo({ name = "Dropdown", list = { "Option 1", "Option 2", "Option 3" }, default = "Option 1", flag = "dropdown" })
 	c1:combo({ name = "Dropdown2", list = { "Option 1", "Option 2", "Option 3" }, multi = true, flag = "dropdown2" })
 	c1:color({ name = "Colour", default = Color3.fromRGB(128, 128, 255), flag = "outline" })
-	local heavy = c1:toggle({
-		name = "Checkbox", default = false, flag = "heavy",
+	c1:toggle({
+		name = "Checkbox", default = false, flag = "heavy", dangerous = true,
 		callback = function(v)
-			if v then
-				lib:confirm({
-					title = "heavy feature", text = "this can cause lags / freezes. enable it?",
-					confirm = "enable", cancel = "cancel",
-					callback = function()
-						local e = lib.flags.heavy
-						if e and e.set then e:set(true, true) end
-						lib:notify({ title = "heavy feature", text = "enabled — watch your fps", icon = "zap", life = 4 })
-					end,
-				})
-				return false
-			end
+			lib:notify({ title = "Checkbox", text = v and "enabled" or "disabled", icon = "shield" })
 		end,
 	})
 	local cb1 = c1:checkbox({ name = "Checkbox1", options = true, flag = "checkbox1" })
@@ -3740,11 +4704,56 @@ local ok2, err = xpcall(function()
 	do
 		local tab = win:tab({ name = "Tab 2", icon = "eye", tip = "yall holy" })
 		tab:sub({ name = "Sub-tab 1", icon = "eye" })
+		local mb = tab:section({ name = "Mobile buttons", icon = "gamepad-2", side = "left" })
+		mb:checkbox({
+			name = "Phone buttons", default = lib.mobile and true or false, flag = "ui_mobile", hud = false,
+			callback = function(on) lib:setmobile(on) end,
+		})
+		mb:checkbox({
+			name = "Liquid glass", default = false, flag = "mob_glass", hud = false,
+			callback = function() if lib._mrepaint then lib._mrepaint() end end,
+		})
+		mb:checkbox({
+			name = "Keep buttons apart", default = true, flag = "mob_guard", hud = false,
+			callback = function() if lib._mguard then lib._mguard() end end,
+		})
+		mb:slider({
+			name = "Button size", min = 30, max = 92, step = 2, default = 38, suffix = " px", flag = "mob_size",
+			callback = function(v) lib:setmobsize(v) end,
+		})
+		mb:button({ name = "Reset positions", icon = "refresh-cw", callback = function() lib:mobreset() end })
+		local ma = tab:section({ name = "Button actions", icon = "zap", side = "right" })
+		local extra = {}
+		ma:button({
+			name = "Add test button", icon = "plus",
+			callback = function()
+				local n = #extra + 1
+				extra[n] = lib:mobtn({ tip = "Test " .. n, icon = "sparkles", fn = function()
+					lib:notify({ title = "Mobile", text = "test button " .. n .. " tapped", icon = "sparkles" })
+				end })
+				lib:setmobile(true)
+			end,
+		})
+		ma:button({
+			name = "Remove test buttons", icon = "trash-2",
+			callback = function()
+				for _, el in ipairs(extra) do lib:remobtn(el) end
+				table.clear(extra)
+			end,
+		})
+		lib:mobtn({ tip = "Notify", icon = "bell", fn = function()
+			lib:notify({ title = "Mobile", text = "hello from a phone button", icon = "bell" })
+		end })
+		lib:mobtn({ tip = "Toggle", icon = "toggle-right", flag = "toggle" })
+		lib:mobtn({ tip = "Click", icon = "zap", fn = function()
+			lib:notify({ title = "Button", text = "clicked", icon = "zap" })
+		end })
 	end
 	local tCfg = win:tab({ name = "config", icon = "settings", tip = "menu settings" })
 	local Players = game:GetService("Players")
 	local HttpService = game:GetService("HttpService")
 	local TeleportService = game:GetService("TeleportService")
+	local VirtualUser = game:GetService("VirtualUser")
 	local LP = Players.LocalPlayer
 	local function notify(title, text, icon, life)
 		lib:notify({ title = title, text = text or "", icon = icon or "info", life = life or 4 })
@@ -3787,7 +4796,7 @@ local ok2, err = xpcall(function()
 		end)
 	end
 	local function copyJobId()
-		local ok = pcall(function() setclipboard(tostring(game.JobId)) end)
+		local ok = lib:copy(tostring(game.JobId))
 		notify("Server", ok and ("copied: " .. tostring(game.JobId)) or "setclipboard unavailable", ok and "check" or "x", 6)
 	end
 	local function joinJobId(raw)
@@ -3823,7 +4832,21 @@ local ok2, err = xpcall(function()
 		name = "Menu Key", default = Enum.KeyCode.LeftControl, hud = false,
 		callback = function(k) win:setbind(k) end,
 	})
+	ms:checkbox({ name = "Hotkeys", default = lib.hotkeys, flag = "hud_hotkeys", hud = false, callback = function(on) lib:sethotkeys(on) end })
+	ms:checkbox({ name = "Enabled functions", default = lib.functions, flag = "hud_functions", hud = false, callback = function(on) lib:setfunctions(on) end })
 	ms:themes()
+	lib.startupurl = "https://raw.githubusercontent.com/Rem1Sec/yall-holy/main/yall_holy.lua"
+	local autostart = ms:checkbox({
+		name = "Auto-execute script", hud = false,
+		callback = function(on)
+			local ok, err = lib:setautostart(on)
+			if not ok then notify("Autostart", err, "x", 8); return false end
+			notify("Autostart", on and "Runs after rejoining, latest source from GitHub. Unload disables it." or "disabled", "power", 6)
+		end,
+	})
+	lib._startupcontrols = lib._startupcontrols or {}
+	lib._startupcontrols[#lib._startupcontrols + 1] = function() autostart:set(lib:startupsettings().script, true) end
+	autostart:set(lib:startupsettings().script, true)
 
 	ms:button({
 		name = "Unload", icon = "power",
@@ -3838,14 +4861,19 @@ local ok2, err = xpcall(function()
 
 	local soc = tCfg:section({ name = "Support / Socials", side = "right", gap = 2 })
 	local function socialLink(title, link)
-		local opened = (typeof(open_url) == "function" and pcall(open_url, link)) or false
-		local copied = pcall(function() setclipboard(link) end)
-		notify(title, opened and ("opening " .. link) or copied and ("copied: " .. link) or link,
-			(opened or copied) and "check" or "x", 6)
+		local opened, err = lib:openurl(link)
+		if opened then notify(title, "opening " .. link, "check", 6); return end
+		local copied = lib:copy(link)
+		if copied then
+			notify(title, "copied: " .. link, "copy", 6)
+		else
+			local blocked = tostring(err):find("dangerous call", 1, true) ~= nil
+			notify(title, (blocked and "Executor blocked browser API. " or "No browser API available. ") .. link, "link", 10)
+		end
 	end
 	soc:button({
 		name = "Telegram", icon = "send",
-		callback = function() socialLink("Telegram", "https://t.me/alawox") end,
+		callback = function() socialLink("Telegram", "https://t.me/yallholy") end,
 	})
 	soc:button({
 		name = "Discord", icon = "users",
@@ -3863,7 +4891,27 @@ local ok2, err = xpcall(function()
 		name = "Join by Job ID", icon = "activity",
 		callback = function() joinJobId(jobin:get()) end,
 	})
+
+	local antiAfkConn
+	local function setAntiAfk(on)
+		if antiAfkConn then antiAfkConn:Disconnect(); antiAfkConn = nil end
+		if on then
+			antiAfkConn = LP.Idled:Connect(function()
+				pcall(function()
+					VirtualUser:CaptureController()
+					VirtualUser:ClickButton2(Vector2.new(0, 0))
+				end)
+			end)
+		end
+	end
+	local misc = tCfg:section({ name = "Misc", side = "left" })
+	misc:checkbox({
+		name = "Anti-AFK", default = true, flag = "antiafk", hud = false,
+		callback = function(on) setAntiAfk(on) end,
+	})
+
 	lib:notify({ title = "yall holy", text = "LeftControl - open / close", icon = "check", life = 5 })
 end, debug.traceback)
 if not ok2 then warn("[ui] BUILD ERROR: " .. tostring(err)) end
+return lib
 
