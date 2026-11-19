@@ -90,9 +90,8 @@ do
 	local cam = workspace.CurrentCamera
 	local vp = cam and cam.ViewportSize
 	local touch = UIS.TouchEnabled
-	IS_PHONE = (touch and not UIS.MouseEnabled)
-		or (vp ~= nil and vp.X <= 700)
-		or (touch and vp ~= nil and vp.X <= 1400)
+	local wide = vp ~= nil and vp.X >= 1000
+	IS_PHONE = not (not touch and wide)
 end
 local lib = {
 	ver = "1",
